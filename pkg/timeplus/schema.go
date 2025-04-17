@@ -148,7 +148,7 @@ SELECT
 		WHEN hasColumn('host') AND isNotNull(host) THEN host
 		WHEN hasColumn('user_id') AND isNotNull(user_id) THEN user_id 
 		WHEN hasColumn('id') AND isNotNull(id) THEN id
-		ELSE toString(now64(3)) -- Fallback: use timestamp as unique ID if no identifying field exists
+		ELSE toString(now64(3)) 
 	END AS entity_id,
 	'active' AS state,
 	now() AS created_at,
@@ -184,37 +184,62 @@ func GetRulePlainViewQuery(ruleID, ruleQuery string) string {
 	return fmt.Sprintf("CREATE VIEW %s AS %s", viewName, ruleQuery)
 }
 
-// GetRuleThrottledMaterializedViewQuery returns a SQL query to create a materialized view
-// that joins the rule view with the alert acks mutable stream for throttling.
-func GetRuleThrottledMaterializedViewQuery(ruleID string, throttleMinutes int, idColumnName string) string {
-	// Sanitize the rule ID for view name
+// GetRuleThrottledMaterializedViewQuery generates the SQL query for creating a materialized view
+// that feeds into tp_alert_acks_mutable and includes throttling logic, using a CTE.
+func GetRuleThrottledMaterializedViewQuery(
+	ruleID string,
+	ThrottleMinutes int,
+	idColumnName string,
+	triggeringDataExpr string, // SQL expression for the comment field (e.g., a JSON string)
+) string {
 	sanitizedRuleID := strings.ReplaceAll(ruleID, "-", "_")
-	plainViewName := fmt.Sprintf("rule_%s_view", sanitizedRuleID)
+	viewName := fmt.Sprintf("rule_%s_view", sanitizedRuleID)
 	mvName := fmt.Sprintf("rule_%s_mv", sanitizedRuleID)
 
-	// Throttling is handled by the mutable stream's primary key.
-	// No need for throttleDuration variable here anymore.
+	// Throttling condition using Timeplus interval syntax, referencing aliased ack columns
+	throttleCondition := "ack_state = ''" // Always trigger if no previous state
+	if ThrottleMinutes >= 0 {             // Apply user logic if throttle is enabled (>= 0)
+		throttleCondition = fmt.Sprintf(`(
+			ack_state = '' OR
+			ack_state = '%s' OR
+			now() - %dm > view._tp_time
+		)`, AlertStateAcknowledged, ThrottleMinutes)
+	} else {
+		// If ThrottleMinutes is negative (e.g., -1), effectively disable throttling beyond the initial trigger
+		throttleCondition = "ack_state = ''"
+	}
 
+	// Use CTE to resolve potential column name conflicts and clarify logic
 	query := fmt.Sprintf(`
 CREATE MATERIALIZED VIEW %s INTO %s AS
+WITH filtered_events AS (
+    SELECT
+        view.*,
+        ack.state AS ack_state,
+        ack.created_at AS ack_created_at
+    FROM %s AS view
+    LEFT JOIN %s AS ack ON view.%s = ack.entity_id
+    WHERE (ack.rule_id = '' OR ack.rule_id = '%s') AND (%s)
+)
 SELECT
     '%s' AS rule_id,
-    entity_id, -- Already concatenated in the plain view
+    fe.%s AS entity_id,
     '%s' AS state,
-    now() AS created_at,
-    now() AS updated_at,
+    fe._tp_time AS created_at,
+    fe._tp_time AS updated_at,
     '' AS updated_by,
-    '' AS comment
-FROM %s
-`,
-		// Arguments for fmt.Sprintf
-		mvName,                 // 1. MV name
-		AlertAcksMutableStream, // 2. INTO target (mutable)
-		ruleID,                 // 3. SELECT '%s' AS rule_id
-		// entity_id comes directly from plainViewName now
-		AlertStateActive, // 4. SELECT '%s' AS state
-		plainViewName,    // 5. FROM %s (the plain rule view which includes entity_id)
-	)
+    %s AS comment
+FROM filtered_events AS fe`,
+		mvName, AlertAcksMutableStream,
+		viewName,
+		AlertAcksMutableStream,
+		idColumnName,
+		ruleID,
+		throttleCondition,
+		ruleID,
+		idColumnName,
+		AlertStateActive,
+		triggeringDataExpr)
 
 	return query
 }

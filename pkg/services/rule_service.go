@@ -690,11 +690,42 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 
 	logrus.Infof("Using column '%s' as the entity_id for rule %s", idColumnName, rule.ID)
 
+	// Construct the expression to capture triggering data for the comment field as JSON
+	var dataCaptureParts []string
+	for _, column := range columnResults {
+		colName := ""
+		if name, ok := column["name"].(string); ok {
+			colName = name
+		}
+		// Skip internal columns and the potentially generated entity_id column
+		if colName == "" || colName == "_tp_time" || colName == "_tp_sn" || colName == idColumnName {
+			continue
+		}
+		// Format as '"key": "' || to_string(value) || '"'
+		part := fmt.Sprintf("concat('\"%s\": \"', to_string(`%s`), '\"')", colName, colName)
+		dataCaptureParts = append(dataCaptureParts, part)
+	}
+
+	triggeringDataExpr := "'{}'" // Default to empty JSON object
+	if len(dataCaptureParts) > 0 {
+		// Construct the SQL array content string: [part1_expr, part2_expr, ...]
+		// Each part is already a valid SQL expression producing a string.
+		sqlArrayContent := strings.Join(dataCaptureParts, ", ") // Join the SQL expressions with commas
+
+		// Use this array content in array_string_concat
+		joinedPartsExpr := fmt.Sprintf("array_string_concat([%s], ', ')", sqlArrayContent)
+
+		// Wrap with {} using SQL concat
+		triggeringDataExpr = fmt.Sprintf("concat('{', %s, '}')", joinedPartsExpr)
+	}
+	logrus.Infof("Built triggering JSON expression: %s", triggeringDataExpr)
+
 	// Step 4: Create a materialized view that joins with tp_alert_acks_mutable for throttling
 	materializedViewQuery := timeplus.GetRuleThrottledMaterializedViewQuery(
 		rule.ID,
 		rule.ThrottleMinutes,
 		idColumnName,
+		triggeringDataExpr, // Pass the constructed JSON expression
 	)
 
 	logrus.Infof("Creating materialized view with query: %s", materializedViewQuery)
