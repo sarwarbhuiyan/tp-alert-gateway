@@ -457,8 +457,31 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	sanitizedRuleID := GetFormattedRuleID(rule.ID)
 	plainViewName := fmt.Sprintf("rule_%s_view", sanitizedRuleID)
 	materializedViewName := fmt.Sprintf("rule_%s_mv", sanitizedRuleID)
+	ruleAlertAcksStreamName := fmt.Sprintf("rule_%s_alert_acks", sanitizedRuleID)
 
-	// Force drop existing views with retries to ensure we're starting clean
+	// Step 0: Ensure the rule-specific alert acks stream exists
+	logrus.Infof("Ensuring rule-specific alert acks stream exists: %s", ruleAlertAcksStreamName)
+	ackSchema := timeplus.GetMutableAlertAcksSchema() // Use correct package qualifier
+	exists, err := s.tpClient.StreamExists(timeoutCtx, ruleAlertAcksStreamName)
+	if err != nil {
+		rule.Status = models.RuleStatusFailed
+		rule.LastError = fmt.Sprintf("Failed to check existence of stream %s: %v", ruleAlertAcksStreamName, err)
+		s.persistRule(ctx, rule, true)
+		return fmt.Errorf("failed to check existence of stream %s: %w", ruleAlertAcksStreamName, err)
+	}
+	if !exists {
+		if err := s.tpClient.CreateStream(timeoutCtx, ruleAlertAcksStreamName, ackSchema); err != nil {
+			rule.Status = models.RuleStatusFailed
+			rule.LastError = fmt.Sprintf("Failed to create rule-specific alert acks stream %s: %v", ruleAlertAcksStreamName, err)
+			s.persistRule(ctx, rule, true)
+			return fmt.Errorf("failed to create rule-specific alert acks stream %s: %w", ruleAlertAcksStreamName, err)
+		}
+		logrus.Infof("Created rule-specific alert acks stream: %s", ruleAlertAcksStreamName)
+	} else {
+		logrus.Infof("Rule-specific alert acks stream %s already exists", ruleAlertAcksStreamName)
+	}
+
+	// Step 1: Force drop existing views with retries to ensure we're starting clean
 	dropViews := []string{plainViewName, materializedViewName}
 	for _, viewName := range dropViews {
 		// Try up to 3 times to drop each view
@@ -720,12 +743,13 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	}
 	logrus.Infof("Built triggering JSON expression: %s", triggeringDataExpr)
 
-	// Step 4: Create a materialized view that joins with tp_alert_acks_mutable for throttling
+	// Step 4: Create a materialized view that joins with the rule-specific alert acks stream
 	materializedViewQuery := timeplus.GetRuleThrottledMaterializedViewQuery(
 		rule.ID,
 		rule.ThrottleMinutes,
 		idColumnName,
-		triggeringDataExpr, // Pass the constructed JSON expression
+		triggeringDataExpr,
+		ruleAlertAcksStreamName, // Pass the rule-specific stream name
 	)
 
 	logrus.Infof("Creating materialized view with query: %s", materializedViewQuery)

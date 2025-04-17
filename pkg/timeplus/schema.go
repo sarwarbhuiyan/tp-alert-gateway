@@ -185,12 +185,13 @@ func GetRulePlainViewQuery(ruleID, ruleQuery string) string {
 }
 
 // GetRuleThrottledMaterializedViewQuery generates the SQL query for creating a materialized view
-// that feeds into tp_alert_acks_mutable and includes throttling logic, using a CTE.
+// that feeds into a specified rule-specific alert ack stream and includes throttling logic, using a CTE.
 func GetRuleThrottledMaterializedViewQuery(
 	ruleID string,
 	ThrottleMinutes int,
 	idColumnName string,
 	triggeringDataExpr string, // SQL expression for the comment field (e.g., a JSON string)
+	targetAlertStream string, // The rule-specific alert ack stream name
 ) string {
 	sanitizedRuleID := strings.ReplaceAll(ruleID, "-", "_")
 	viewName := fmt.Sprintf("rule_%s_view", sanitizedRuleID)
@@ -200,7 +201,7 @@ func GetRuleThrottledMaterializedViewQuery(
 	throttleCondition := "ack_state = ''" // Always trigger if no previous state
 	if ThrottleMinutes >= 0 {             // Apply user logic if throttle is enabled (>= 0)
 		throttleCondition = fmt.Sprintf(`(
-			ack_state = '' OR
+			ack_state IS NULL OR
 			ack_state = '%s' OR
 			now() - %dm > view._tp_time
 		)`, AlertStateAcknowledged, ThrottleMinutes)
@@ -219,7 +220,7 @@ WITH filtered_events AS (
         ack.created_at AS ack_created_at
     FROM %s AS view
     LEFT JOIN %s AS ack ON view.%s = ack.entity_id
-    WHERE (ack.rule_id = '' OR ack.rule_id = '%s') AND (%s)
+    WHERE (ack.rule_id = '') OR (ack.rule_id = '%s' AND (%s))
 )
 SELECT
     '%s' AS rule_id,
@@ -230,16 +231,16 @@ SELECT
     '' AS updated_by,
     %s AS comment
 FROM filtered_events AS fe`,
-		mvName, AlertAcksMutableStream,
-		viewName,
-		AlertAcksMutableStream,
-		idColumnName,
-		ruleID,
-		throttleCondition,
-		ruleID,
-		idColumnName,
-		AlertStateActive,
-		triggeringDataExpr)
+		mvName, targetAlertStream, // Use parameterized target stream
+		viewName,           // Source view for CTE
+		targetAlertStream,  // Join with parameterized target stream
+		idColumnName,       // Join column entity_id
+		ruleID,             // Rule ID for WHERE clause
+		throttleCondition,  // Throttle condition for WHERE clause
+		ruleID,             // rule_id for final SELECT
+		idColumnName,       // entity_id for final SELECT
+		AlertStateActive,   // state for final SELECT
+		triggeringDataExpr) // comment expression for final SELECT
 
 	return query
 }
