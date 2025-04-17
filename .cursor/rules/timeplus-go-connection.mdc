@@ -1,0 +1,13 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Description:
+When connecting to Timeplus, always use the direct proton driver connection pattern:
+
+conn, err := proton.Open(&proton.Options{...})
+
+followed by direct methods like conn.Exec() and conn.Query().
+
+Never use database/sql interfaces with proton.OpenDB() for Timeplus connections as it can cause materialized view and query issues.

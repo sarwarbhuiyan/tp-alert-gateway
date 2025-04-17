@@ -1,0 +1,14 @@
+{
+  "server": {
+    "port": "8081",
+    "port": "8080",
+    "shutdownTimeout": 5,
+    "allowedOrigins": "*"
+  },
+  "timeplus": {
+    "address": "localhost:8464",
+    "username": "test",
+    "password": "test123",
+    "workspace": "default"
+  }
+} 

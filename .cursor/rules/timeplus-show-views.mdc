@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Timeplus doesn't have a "SHOW VIEWS" command. 
+
+SHOW VIEWS doesn't exist but you can do this:
+
+SELECT name from system.tables WHERE engine = 'MaterializedView' or engine = 'View';

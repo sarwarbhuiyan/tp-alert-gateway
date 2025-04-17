@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+When running alert-gateway, always run it with the local config file which has the right timeplus host, port, user and password

@@ -1,0 +1,27 @@
+time="2025-04-14T18:07:36-04:00" level=info msg="Connecting to Timeplus at localhost:8464 (workspace: default)"
+time="2025-04-14T18:07:36-04:00" level=info msg="Connecting to Timeplus native protocol at localhost:8464"
+time="2025-04-14T18:07:36-04:00" level=info msg="Alert Gateway: Successfully connected to Timeplus."
+time="2025-04-14T18:07:36-04:00" level=info msg="Setting up mutable alert acknowledgments stream"
+time="2025-04-14T18:07:36-04:00" level=info msg="Mutable alert acknowledgments stream already exists"
+time="2025-04-14T18:07:36-04:00" level=info msg="Starting Alert Monitor service"
+time="2025-04-14T18:07:36-04:00" level=info msg="Note: This is now using materialized views to write directly to tp_alert_acks_mutable - no polling is performed"
+time="2025-04-14T18:07:36-04:00" level=info msg="Alert Monitor successfully connected to Timeplus"
+time="2025-04-14T18:07:36-04:00" level=info msg="Alert monitoring service started"
+time="2025-04-14T18:07:36-04:00" level=info msg="Starting server on port 8082"
+
+   ____    __
+  / __/___/ /  ___
+ / _// __/ _ \/ _ \
+/___/\__/_//_/\___/ v4.13.3
+High performance, minimalist Go web framework
+https://echo.labstack.com
+____________________________________O/_______
+                                    O\
+⇨ http server started on [::]:8082
+time="2025-04-14T18:07:49-04:00" level=info msg="GetAlerts query: \n\t\t\tSELECT \n\t\t\t\tuuid() as id, \n\t\t\t\trule_id, \n\t\t\t\tentity_id,\n\t\t\t\tstate,\n\t\t\t\tcreated_at,\n\t\t\t\tupdated_at,\n\t\t\t\tupdated_by,\n\t\t\t\tcomment\n\t\t\tFROM table(tp_alert_acks_mutable)\n\t\t\tORDER BY created_at DESC\n\t\t\tLIMIT 1000\n\t\t"
+{"time":"2025-04-14T18:07:49.224057-04:00","id":"","remote_ip":"::1","host":"localhost:8082","method":"GET","uri":"/api/alerts","user_agent":"curl/8.4.0","status":200,"error":"","latency":20288959,"latency_human":"20.288959ms","bytes_in":0,"bytes_out":462}
+{"time":"2025-04-14T18:07:54.003281-04:00","id":"","remote_ip":"::1","host":"localhost:8082","method":"GET","uri":"/debug/alert_acks","user_agent":"curl/8.4.0","status":200,"error":"","latency":7334750,"latency_human":"7.33475ms","bytes_in":0,"bytes_out":483}
+time="2025-04-15T16:15:13-04:00" level=info msg="Shutting down server..."
+time="2025-04-15T16:15:13-04:00" level=info msg="Shutting down Alert Monitor service"
+time="2025-04-15T16:15:13-04:00" level=info msg="Alert monitor shutdown complete"
+time="2025-04-15T16:15:13-04:00" level=info msg="Server exited properly"

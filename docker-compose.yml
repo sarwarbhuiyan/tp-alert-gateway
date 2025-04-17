@@ -1,0 +1,18 @@
+version: "3"
+
+services:
+  timeplus:
+    image: timeplus/timeplus-enterprise:2.7.5
+    container_name: timeplus
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+      - "8464:8463"
+    environment:
+      - TIMEPLUS_LICENSE_KEY=${TIMEPLUS_LICENSE_KEY:-}
+    volumes:
+      - timeplus-data:/var/lib/timeplus
+
+volumes:
+  timeplus-data:
+

@@ -1,0 +1,107 @@
+Connecting to Timeplus at localhost:8464 (user: test)
+Listing materialized views (using direct query):
+- rule_51cddeae-cde6-4149-9a52-3fc93fd22f54_view
+- rule_5585ca7c-49a3-4091-9865-d5b74da46702_view
+- rule_5e67adc5-ef2a-4ead-a2c9-77e78c837bd1_view
+- rule_c67d069a-10e9-4ed8-b160-12f8f5d4edd2_view
+- rule_fcd3dfff-390f-46fb-8f32-19eff1b63d27_view
+
+View Definitions:
+View: rule_51cddeae-cde6-4149-9a52-3fc93fd22f54_view
+Definition: CREATE MATERIALIZED VIEW default.`rule_51cddeae-cde6-4149-9a52-3fc93fd22f54_view`
+(
+  `device_id` string,
+  `temperature` float64,
+  `timestamp` datetime64(3),
+  `_tp_time` datetime64(3, 'UTC'),
+  `_tp_sn` int64
+) AS
+SELECT
+  *
+FROM
+  default.device_temperatures
+WHERE
+  temperature > 30
+
+View: rule_5585ca7c-49a3-4091-9865-d5b74da46702_view
+Definition: CREATE MATERIALIZED VIEW default.`rule_5585ca7c-49a3-4091-9865-d5b74da46702_view`
+(
+  `device_id` string,
+  `temperature` float64,
+  `timestamp` datetime64(3),
+  `_tp_time` datetime64(3, 'UTC'),
+  `_tp_sn` int64
+) AS
+SELECT
+  *
+FROM
+  default.device_temperatures
+WHERE
+  (device_id = 'device_1') AND (temperature > 25)
+
+View: rule_5e67adc5-ef2a-4ead-a2c9-77e78c837bd1_view
+Definition: CREATE MATERIALIZED VIEW default.`rule_5e67adc5-ef2a-4ead-a2c9-77e78c837bd1_view`
+(
+  `device_id` string,
+  `temperature` float64,
+  `timestamp` datetime64(3),
+  `_tp_time` datetime64(3, 'UTC'),
+  `_tp_sn` int64
+) AS
+SELECT
+  *
+FROM
+  default.device_temperatures
+WHERE
+  temperature > 30
+
+View: rule_c67d069a-10e9-4ed8-b160-12f8f5d4edd2_view
+Definition: CREATE MATERIALIZED VIEW default.`rule_c67d069a-10e9-4ed8-b160-12f8f5d4edd2_view`
+(
+  `device_id` string,
+  `temperature` float64,
+  `timestamp` datetime64(3),
+  `_tp_time` datetime64(3, 'UTC'),
+  `_tp_sn` int64
+) AS
+SELECT
+  *
+FROM
+  default.device_temperatures
+WHERE
+  temperature < 19
+
+View: rule_fcd3dfff-390f-46fb-8f32-19eff1b63d27_view
+Definition: CREATE MATERIALIZED VIEW default.`rule_fcd3dfff-390f-46fb-8f32-19eff1b63d27_view`
+(
+  `device_id` string,
+  `temperature` float64,
+  `timestamp` datetime64(3),
+  `_tp_time` datetime64(3, 'UTC'),
+  `_tp_sn` int64
+) AS
+SELECT
+  *
+FROM
+  default.device_temperatures
+WHERE
+  temperature > 30
+
+
+Listing streams:
+- device_temperatures
+- [RULE RESULT] rule_51cddeae-cde6-4149-9a52-3fc93fd22f54_results
+- [RULE RESULT] rule_5585ca7c-49a3-4091-9865-d5b74da46702_results
+- [RULE RESULT] rule_5e67adc5-ef2a-4ead-a2c9-77e78c837bd1_results
+- [RULE RESULT] rule_c67d069a-10e9-4ed8-b160-12f8f5d4edd2_results
+- [RULE RESULT] rule_fcd3dfff-390f-46fb-8f32-19eff1b63d27_results
+- tp_alerts
+- tp_rules
+- license_validation_log
+- stream_metric_log
+- stream_state_log
+
+Sample data from rule result streams:
+
+Stream: rule_51cddeae-cde6-4149-9a52-3fc93fd22f54_results
+Columns: [event_time data _tp_time]

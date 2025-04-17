@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Whenever you run a SELECT query to check if some data has been written to a timeplus stream, ensure you wrap the stream or view name with table()

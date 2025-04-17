@@ -1,0 +1,1 @@
+{"name":"Test Temperature Alert","description":"Alert when temperature is too high","query":"SELECT * FROM device_temperatures WHERE temperature > 38","source_stream":"device_temperatures","severity":"critical","throttle_minutes":5}

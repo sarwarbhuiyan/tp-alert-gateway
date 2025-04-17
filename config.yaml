@@ -1,0 +1,9 @@
+server:
+  port: "8080"
+  allowedOrigins: "*"
+  shutdownTimeout: 15
+
+timeplus:
+  address: "localhost" # Host address for Timeplus/Proton, without port or protocol
+  apiKey: "your-api-key-here"
+  workspace: "default" 
