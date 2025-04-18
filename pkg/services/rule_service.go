@@ -63,7 +63,7 @@ func NewRuleService(tpClient timeplus.TimeplusClient) (*RuleService, error) {
 	return service, nil
 }
 
-// ensureRuleStream ensures that the rule stream exists
+// ensureRuleStream ensures that the rule stream exists and is mutable
 func ensureRuleStream(ctx context.Context, tpClient timeplus.TimeplusClient) error {
 	exists, err := tpClient.StreamExists(ctx, RuleStreamName)
 	if err != nil {
@@ -71,7 +71,7 @@ func ensureRuleStream(ctx context.Context, tpClient timeplus.TimeplusClient) err
 	}
 
 	if !exists {
-		logrus.Infof("Creating rule stream: %s", RuleStreamName)
+		logrus.Infof("Creating mutable rule stream: %s", RuleStreamName)
 		ruleSchema := []timeplus.Column{
 			{Name: "id", Type: "string"},
 			{Name: "name", Type: "string"},
@@ -83,18 +83,51 @@ func ensureRuleStream(ctx context.Context, tpClient timeplus.TimeplusClient) err
 			{Name: "entity_id_columns", Type: "string"},
 			{Name: "created_at", Type: "datetime64"},
 			{Name: "updated_at", Type: "datetime64"},
-			{Name: "last_triggered_at", Type: "datetime64 NULL"},
+			{Name: "last_triggered_at", Type: "datetime64", Nullable: true},
 			{Name: "source_stream", Type: "string"},
 			{Name: "result_stream", Type: "string"},
 			{Name: "view_name", Type: "string"},
-			{Name: "last_error", Type: "string"},
+			{Name: "last_error", Type: "string", Nullable: true},
+			// New fields for alert ack stream config
+			{Name: "dedicated_alert_acks_stream", Type: "bool", Nullable: true}, // Store *bool as nullable bool
+			{Name: "alert_acks_stream_name", Type: "string", Nullable: true},    // Store optional string as nullable
+			// Internal fields
 			{Name: "_tp_time", Type: "datetime64"},
-			{Name: "active", Type: "bool"}, // Flag to mark if a rule is active or deleted
+			// {Name: "active", Type: "bool"}, // 'active' flag might not be needed with mutable stream PK logic?
+			// Let's keep it for now for soft deletes in DeleteRule.
+			{Name: "active", Type: "bool"},
 		}
-		if err := tpClient.CreateStream(ctx, RuleStreamName, ruleSchema); err != nil {
-			return fmt.Errorf("failed to create rule stream: %w", err)
+
+		// Construct the CREATE MUTABLE STREAM query manually
+		columnsStr := ""
+		for i, col := range ruleSchema {
+			if i > 0 {
+				columnsStr += ", "
+			}
+			nullableStr := ""
+			if col.Nullable {
+				nullableStr = " NULL"
+			}
+			columnsStr += fmt.Sprintf("`%s` %s%s", col.Name, col.Type, nullableStr)
 		}
+		// Define primary key
+		primaryKeys := []string{"id"}
+		pkStr := fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(primaryKeys, ", "))
+
+		createMutableStreamQuery := fmt.Sprintf("CREATE MUTABLE STREAM `%s` (%s) %s",
+			RuleStreamName, columnsStr, pkStr)
+
+		logrus.Infof("Executing query to create mutable rule stream: %s", createMutableStreamQuery)
+		if err := tpClient.ExecuteDDL(ctx, createMutableStreamQuery); err != nil {
+			return fmt.Errorf("failed to create mutable rule stream %s: %w", RuleStreamName, err)
+		}
+
+		logrus.Infof("Created mutable rule stream: %s", RuleStreamName)
 	}
+
+	// TODO: Handle schema migration if stream exists but schema is outdated?
+	// For now, assume if it exists, it's correct or needs manual intervention.
+	logrus.Infof("Mutable rule stream '%s' exists.", RuleStreamName)
 	return nil
 }
 
@@ -144,8 +177,9 @@ func (s *RuleService) GetRules() ([]*models.Rule, error) {
 	// Query to get the latest version of each active rule
 	query := fmt.Sprintf(`
 		SELECT id, name, description, query, status, severity, 
-		       throttle_minutes, entity_id_columns, created_at, updated_at, last_triggered_at,
-		       source_stream, result_stream, view_name, last_error
+			   throttle_minutes, entity_id_columns, created_at, updated_at, last_triggered_at,
+			   source_stream, result_stream, view_name, last_error,
+			   dedicated_alert_acks_stream, alert_acks_stream_name
 		FROM (
 			SELECT *, row_number() OVER (PARTITION BY id ORDER BY _tp_time DESC) as row_num
 			FROM table(%s)
@@ -169,6 +203,8 @@ func (s *RuleService) GetRules() ([]*models.Rule, error) {
 
 // mapToRule converts a map of query results to a Rule struct
 func mapToRule(data map[string]interface{}) *models.Rule {
+	logrus.Debugf("MAP_TO_RULE: Input data map: %+v", data) // Log input data
+
 	rule := &models.Rule{
 		ID:              getString(data, "id"),
 		Name:            getString(data, "name"),
@@ -182,7 +218,26 @@ func mapToRule(data map[string]interface{}) *models.Rule {
 		ResultStream:    getString(data, "result_stream"),
 		ViewName:        getString(data, "view_name"),
 		LastError:       getString(data, "last_error"),
+		// Map AlertAcksStreamName directly (handles null from DB)
+		AlertAcksStreamName: getString(data, "alert_acks_stream_name"),
 	}
+
+	// Debugging the boolean mapping
+	dedicatedValRaw, dedicatedExists := data["dedicated_alert_acks_stream"]
+	logrus.Debugf("MAP_TO_RULE [%s]: Raw 'dedicated_alert_acks_stream' value: %v (exists: %t, type: %T)",
+		rule.ID, dedicatedValRaw, dedicatedExists, dedicatedValRaw)
+
+	// Handle nullable boolean DedicatedAlertAcksStream
+	if val, ok := data["dedicated_alert_acks_stream"]; ok && val != nil {
+		// Check if it's already a pointer to bool (as seen in debug logs)
+		if boolPtr, ok := val.(*bool); ok {
+			rule.DedicatedAlertAcksStream = boolPtr // Assign the pointer directly
+		} else if boolVal, ok := val.(bool); ok { // Check if it's a direct bool (fallback)
+			rule.DedicatedAlertAcksStream = &boolVal // Create a pointer to the bool value
+		} else {
+			logrus.Warnf("MAP_TO_RULE [%s]: Unexpected type for dedicated_alert_acks_stream: %T", rule.ID, val)
+		}
+	} // If val is nil or not present, rule.DedicatedAlertAcksStream remains nil (default)
 
 	// Handle dates
 	if createdAt, ok := data["created_at"].(time.Time); ok {
@@ -191,8 +246,10 @@ func mapToRule(data map[string]interface{}) *models.Rule {
 	if updatedAt, ok := data["updated_at"].(time.Time); ok {
 		rule.UpdatedAt = updatedAt
 	}
-	if lastTriggered, ok := data["last_triggered_at"].(time.Time); ok {
-		rule.LastTriggeredAt = &lastTriggered
+	if lastTriggered, ok := data["last_triggered_at"]; ok && lastTriggered != nil {
+		if timeVal, ok := lastTriggered.(time.Time); ok {
+			rule.LastTriggeredAt = &timeVal
+		}
 	}
 
 	return rule
@@ -228,8 +285,9 @@ func (s *RuleService) GetRule(id string) (*models.Rule, error) {
 	// Query to get the latest version of the specified rule
 	query := fmt.Sprintf(`
 		SELECT id, name, description, query, status, severity, 
-		       throttle_minutes, entity_id_columns, created_at, updated_at, last_triggered_at,
-		       source_stream, result_stream, view_name, last_error
+			   throttle_minutes, entity_id_columns, created_at, updated_at, last_triggered_at,
+			   source_stream, result_stream, view_name, last_error,
+			   dedicated_alert_acks_stream, alert_acks_stream_name
 		FROM (
 			SELECT *, row_number() OVER (PARTITION BY id ORDER BY _tp_time DESC) as row_num
 			FROM table(%s)
@@ -255,23 +313,31 @@ func (s *RuleService) CreateRule(ctx context.Context, req *models.CreateRuleRequ
 	now := time.Now()
 
 	// Sanitize the rule ID for stream and view names by replacing hyphens with underscores
-	sanitizedRuleID := strings.ReplaceAll(ruleID, "-", "_")
+	sanitizedRuleID := GetFormattedRuleID(ruleID)
+
+	// Determine dedicated stream setting
+	dedicatedStream := false // Default to false
+	if req.DedicatedAlertAcksStream != nil {
+		dedicatedStream = *req.DedicatedAlertAcksStream
+	}
 
 	// Create the rule
 	rule := &models.Rule{
-		ID:              ruleID,
-		Name:            req.Name,
-		Description:     req.Description,
-		Query:           req.Query,
-		Status:          models.RuleStatusCreated,
-		Severity:        req.Severity,
-		ThrottleMinutes: req.ThrottleMinutes,
-		EntityIDColumns: req.EntityIDColumns,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		SourceStream:    req.SourceStream,
-		ResultStream:    fmt.Sprintf("rule_%s_results", sanitizedRuleID),
-		ViewName:        fmt.Sprintf("rule_%s_view", sanitizedRuleID),
+		ID:                       ruleID,
+		Name:                     req.Name,
+		Description:              req.Description,
+		Query:                    req.Query,
+		Status:                   models.RuleStatusCreated,
+		Severity:                 req.Severity,
+		ThrottleMinutes:          req.ThrottleMinutes,
+		EntityIDColumns:          req.EntityIDColumns,
+		CreatedAt:                now,
+		UpdatedAt:                now,
+		SourceStream:             req.SourceStream,
+		ResultStream:             fmt.Sprintf("rule_%s_results", sanitizedRuleID),
+		ViewName:                 fmt.Sprintf("rule_%s_view", sanitizedRuleID),
+		DedicatedAlertAcksStream: &dedicatedStream,        // Store the determined value
+		AlertAcksStreamName:      req.AlertAcksStreamName, // Copy optional name
 	}
 
 	// Persist the rule to Timeplus
@@ -304,11 +370,47 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 		lastTriggeredAt = nil // Use a nil value
 	}
 
+	// Handle nullable boolean for DedicatedAlertAcksStream
+	var dedicatedAlertAcksStream interface{}
+	if rule.DedicatedAlertAcksStream != nil {
+		dedicatedAlertAcksStream = *rule.DedicatedAlertAcksStream // Use the pointer's value
+	} else {
+		// If the pointer is nil, determine value based on context (create vs update)
+		if active { // 'active' is true during initial creation persistence
+			dedicatedAlertAcksStream = false // Default to false if omitted during creation
+		} else {
+			// During updates or soft deletes (active=false), nil means no change/use existing DB value
+			// However, InsertIntoStream might require an explicit value or handle nil correctly.
+			// Let's assume nil is okay for updates where the field wasn't provided.
+			// If the DB column doesn't allow NULL, this needs adjustment.
+			dedicatedAlertAcksStream = nil // Represent as NULL for updates if omitted
+		}
+	}
+
+	// Explicitly prepare the boolean value for insertion
+	var dedicatedStreamValue bool = false // Default to false
+	if dedicatedAlertAcksStream != nil {
+		// Type assert the interface{} back to bool
+		if val, ok := dedicatedAlertAcksStream.(bool); ok {
+			dedicatedStreamValue = val
+		}
+	}
+
+	// Handle nullable string for AlertAcksStreamName
+	var alertAcksStreamName interface{}
+	if rule.AlertAcksStreamName != "" {
+		alertAcksStreamName = rule.AlertAcksStreamName
+	} else {
+		alertAcksStreamName = nil // Use nil for database NULL
+	}
+
 	// Define columns for insertion
 	columns := []string{
 		"id", "name", "description", "query", "status", "severity", "throttle_minutes",
 		"entity_id_columns", "created_at", "updated_at", "last_triggered_at",
-		"source_stream", "result_stream", "view_name", "last_error", "active",
+		"source_stream", "result_stream", "view_name", "last_error",
+		"dedicated_alert_acks_stream", "alert_acks_stream_name",
+		"active",
 	}
 
 	// Prepare values for insertion
@@ -328,8 +430,14 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 		rule.ResultStream,
 		rule.ViewName,
 		rule.LastError,
+		dedicatedStreamValue, // Pass the explicitly typed boolean value
+		alertAcksStreamName,  // Pass the interface{} value (string or nil)
 		active,
 	}
+
+	// Log the values being inserted for debugging
+	logrus.Debugf("PERSIST_RULE: Persisting rule %s with values: Status=%v, DedicatedStreamFlag=%v, StreamName=%v, Active=%v",
+		rule.ID, string(rule.Status), dedicatedStreamValue, alertAcksStreamName, active)
 
 	// Use the client's InsertIntoStream method
 	err := s.tpClient.InsertIntoStream(ctx, s.ruleStream, columns, values)
@@ -367,6 +475,12 @@ func (s *RuleService) UpdateRule(ctx context.Context, id string, req *models.Upd
 	}
 	if req.EntityIDColumns != nil {
 		rule.EntityIDColumns = *req.EntityIDColumns
+	}
+	if req.DedicatedAlertAcksStream != nil {
+		rule.DedicatedAlertAcksStream = req.DedicatedAlertAcksStream
+	}
+	if req.AlertAcksStreamName != nil {
+		rule.AlertAcksStreamName = *req.AlertAcksStreamName // Dereference pointer
 	}
 
 	rule.UpdatedAt = time.Now()
@@ -432,7 +546,7 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	defer cancel()
 
 	// Add a small delay to allow the rule persistence to become consistent
-	time.Sleep(500 * time.Millisecond) // Wait 500ms
+	time.Sleep(3 * time.Second) // Wait 3s - Increased delay for consistency
 
 	rule, err := s.GetRule(ruleID)
 	if err != nil {
@@ -457,29 +571,35 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	sanitizedRuleID := GetFormattedRuleID(rule.ID)
 	plainViewName := fmt.Sprintf("rule_%s_view", sanitizedRuleID)
 	materializedViewName := fmt.Sprintf("rule_%s_mv", sanitizedRuleID)
-	ruleAlertAcksStreamName := fmt.Sprintf("rule_%s_alert_acks", sanitizedRuleID)
 
-	// Step 0: Ensure the rule-specific alert acks stream exists
-	logrus.Infof("Ensuring rule-specific alert acks stream exists: %s", ruleAlertAcksStreamName)
-	ackSchema := timeplus.GetMutableAlertAcksSchema() // Use correct package qualifier
-	exists, err := s.tpClient.StreamExists(timeoutCtx, ruleAlertAcksStreamName)
-	if err != nil {
-		rule.Status = models.RuleStatusFailed
-		rule.LastError = fmt.Sprintf("Failed to check existence of stream %s: %v", ruleAlertAcksStreamName, err)
-		s.persistRule(ctx, rule, true)
-		return fmt.Errorf("failed to check existence of stream %s: %w", ruleAlertAcksStreamName, err)
-	}
-	if !exists {
-		if err := s.tpClient.CreateStream(timeoutCtx, ruleAlertAcksStreamName, ackSchema); err != nil {
-			rule.Status = models.RuleStatusFailed
-			rule.LastError = fmt.Sprintf("Failed to create rule-specific alert acks stream %s: %v", ruleAlertAcksStreamName, err)
-			s.persistRule(ctx, rule, true)
-			return fmt.Errorf("failed to create rule-specific alert acks stream %s: %w", ruleAlertAcksStreamName, err)
-		}
-		logrus.Infof("Created rule-specific alert acks stream: %s", ruleAlertAcksStreamName)
+	// Determine target alert stream name based on rule config
+	targetAlertStreamName := timeplus.AlertAcksMutableStream // Default to global
+	useDedicatedStream := false
+	if rule.AlertAcksStreamName != "" { // Explicit name overrides everything
+		targetAlertStreamName = rule.AlertAcksStreamName
+		useDedicatedStream = true
+		logrus.Infof("Using explicitly named alert acks stream: %s", targetAlertStreamName)
+	} else if rule.DedicatedAlertAcksStream != nil && *rule.DedicatedAlertAcksStream { // Dedicated flag is true
+		targetAlertStreamName = fmt.Sprintf("rule_%s_alert_acks", sanitizedRuleID)
+		useDedicatedStream = true
+		logrus.Infof("Using generated dedicated alert acks stream: %s", targetAlertStreamName)
 	} else {
-		logrus.Infof("Rule-specific alert acks stream %s already exists", ruleAlertAcksStreamName)
+		logrus.Infof("Using global alert acks stream: %s", targetAlertStreamName)
 	}
+
+	// Step 0: Ensure the target mutable alert acks stream exists if it's not the global one
+	if useDedicatedStream {
+		logrus.Infof("Ensuring dedicated alert acks stream exists: %s", targetAlertStreamName)
+		ackSchema := timeplus.GetMutableAlertAcksSchema() // Use correct package qualifier
+		primaryKeys := []string{"rule_id", "entity_id"}   // Define the primary key
+		if err := s.tpClient.EnsureMutableStream(timeoutCtx, targetAlertStreamName, ackSchema, primaryKeys); err != nil {
+			rule.Status = models.RuleStatusFailed
+			rule.LastError = fmt.Sprintf("Failed to ensure dedicated mutable alert acks stream %s: %v", targetAlertStreamName, err)
+			s.persistRule(ctx, rule, true)
+			return fmt.Errorf("failed to ensure dedicated mutable alert acks stream %s: %w", targetAlertStreamName, err)
+		}
+		logrus.Infof("Ensured dedicated mutable alert acks stream exists: %s", targetAlertStreamName)
+	} // else: Don't need to ensure global stream here, assumed to exist
 
 	// Step 1: Force drop existing views with retries to ensure we're starting clean
 	dropViews := []string{plainViewName, materializedViewName}
@@ -743,13 +863,13 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	}
 	logrus.Infof("Built triggering JSON expression: %s", triggeringDataExpr)
 
-	// Step 4: Create a materialized view that joins with the rule-specific alert acks stream
+	// Step 4: Create a materialized view that joins with the target alert acks stream
 	materializedViewQuery := timeplus.GetRuleThrottledMaterializedViewQuery(
 		rule.ID,
 		rule.ThrottleMinutes,
 		idColumnName,
 		triggeringDataExpr,
-		ruleAlertAcksStreamName, // Pass the rule-specific stream name
+		targetAlertStreamName, // Pass the determined target stream name
 	)
 
 	logrus.Infof("Creating materialized view with query: %s", materializedViewQuery)
@@ -777,11 +897,26 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 		return fmt.Errorf("failed to create throttled materialized view: %w", createErr)
 	}
 
-	// Update rule status to running
+	// Step 5: Update rule status to running
 	rule.Status = models.RuleStatusRunning
+	rule.LastError = "" // Clear last error on success
 	rule.UpdatedAt = time.Now()
 
-	if err := s.persistRule(timeoutCtx, rule, true); err != nil {
+	// Explicitly set the pointer value based on the determined logic
+	// This ensures the correct value is persisted even if the original pointer was lost/overwritten.
+	rule.DedicatedAlertAcksStream = &useDedicatedStream
+
+	// Log the value being persisted
+	var dedicatedFlagValue string
+	if rule.DedicatedAlertAcksStream == nil {
+		dedicatedFlagValue = "nil_pointer"
+	} else {
+		dedicatedFlagValue = fmt.Sprintf("%t", *rule.DedicatedAlertAcksStream)
+	}
+	logrus.Debugf("RULE_SERVICE: Final persist in StartRule for rule %s. Status: %s, DedicatedFlagPointerValue: %s", rule.ID, rule.Status, dedicatedFlagValue)
+
+	// Persist the final state
+	if err := s.persistRule(ctx, rule, true); err != nil {
 		return fmt.Errorf("failed to update rule status: %w", err)
 	}
 

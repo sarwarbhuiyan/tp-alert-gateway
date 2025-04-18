@@ -39,6 +39,10 @@ type Rule struct {
 	UpdatedAt       time.Time    `json:"updatedAt"`
 	LastTriggeredAt *time.Time   `json:"lastTriggeredAt,omitempty"`
 
+	// Configuration for Alert Acks Stream
+	DedicatedAlertAcksStream *bool  `json:"dedicatedAlertAcksStream,omitempty"` // Use rule-specific stream if true
+	AlertAcksStreamName      string `json:"alertAcksStreamName,omitempty"`      // Explicit stream name (overrides dedicated flag)
+
 	// Timeplus resource references
 	SourceStream string `json:"sourceStream,omitempty"`
 	ResultStream string `json:"resultStream,omitempty"`
@@ -63,23 +67,27 @@ type Alert struct {
 
 // CreateRuleRequest represents the request payload for creating a rule
 type CreateRuleRequest struct {
-	Name            string       `json:"name"`
-	Description     string       `json:"description"`
-	Query           string       `json:"query"`
-	Severity        RuleSeverity `json:"severity"`
-	ThrottleMinutes int          `json:"throttleMinutes"`
-	EntityIDColumns string       `json:"entityIdColumns"` // Comma-separated list of columns to use as entity_id
-	SourceStream    string       `json:"sourceStream,omitempty"`
+	Name                     string       `json:"name"`
+	Description              string       `json:"description"`
+	Query                    string       `json:"query"`
+	Severity                 RuleSeverity `json:"severity"`
+	ThrottleMinutes          int          `json:"throttleMinutes"`
+	EntityIDColumns          string       `json:"entityIdColumns"` // Comma-separated list of columns to use as entity_id
+	SourceStream             string       `json:"sourceStream,omitempty"`
+	DedicatedAlertAcksStream *bool        `json:"dedicatedAlertAcksStream,omitempty"` // Optional
+	AlertAcksStreamName      string       `json:"alertAcksStreamName,omitempty"`      // Optional
 }
 
 // UpdateRuleRequest represents the request payload for updating a rule
 type UpdateRuleRequest struct {
-	Name            *string       `json:"name,omitempty"`
-	Description     *string       `json:"description,omitempty"`
-	Query           *string       `json:"query,omitempty"`
-	Severity        *RuleSeverity `json:"severity,omitempty"`
-	ThrottleMinutes *int          `json:"throttleMinutes,omitempty"`
-	EntityIDColumns *string       `json:"entityIdColumns,omitempty"` // Comma-separated list of columns to use as entity_id
+	Name                     *string       `json:"name,omitempty"`
+	Description              *string       `json:"description,omitempty"`
+	Query                    *string       `json:"query,omitempty"`
+	Severity                 *RuleSeverity `json:"severity,omitempty"`
+	ThrottleMinutes          *int          `json:"throttleMinutes,omitempty"`
+	EntityIDColumns          *string       `json:"entityIdColumns,omitempty"`          // Comma-separated list of columns to use as entity_id
+	DedicatedAlertAcksStream *bool         `json:"dedicatedAlertAcksStream,omitempty"` // Optional
+	AlertAcksStreamName      *string       `json:"alertAcksStreamName,omitempty"`      // Optional
 }
 
 // AcknowledgeAlertRequest represents the request payload for acknowledging an alert

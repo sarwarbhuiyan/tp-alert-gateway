@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +28,26 @@ import (
 // @BasePath /api
 
 func main() {
+	// Configure Log Level from Environment Variable
+	logLevelStr := os.Getenv("LOG_LEVEL")
+	switch strings.ToLower(logLevelStr) {
+	case "debug":
+		logrus.SetLevel(logrus.DebugLevel)
+	case "info":
+		logrus.SetLevel(logrus.InfoLevel)
+	case "warn", "warning":
+		logrus.SetLevel(logrus.WarnLevel)
+	case "error":
+		logrus.SetLevel(logrus.ErrorLevel)
+	case "fatal":
+		logrus.SetLevel(logrus.FatalLevel)
+	case "panic":
+		logrus.SetLevel(logrus.PanicLevel)
+	default:
+		logrus.SetLevel(logrus.InfoLevel) // Default to Info
+	}
+	logrus.Infof("Log level set to: %s", logrus.GetLevel().String())
+
 	// Parse command line flags
 	configPath := flag.String("config", "", "path to config file")
 	flag.Parse()

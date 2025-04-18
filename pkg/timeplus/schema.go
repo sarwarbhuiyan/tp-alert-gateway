@@ -201,9 +201,9 @@ func GetRuleThrottledMaterializedViewQuery(
 	throttleCondition := "ack_state = ''" // Always trigger if no previous state
 	if ThrottleMinutes >= 0 {             // Apply user logic if throttle is enabled (>= 0)
 		throttleCondition = fmt.Sprintf(`(
-			ack_state IS NULL OR
+			ack_state = '' OR
 			ack_state = '%s' OR
-			now() - %dm > view._tp_time
+			(now() - %dm > ack.created_at)
 		)`, AlertStateAcknowledged, ThrottleMinutes)
 	} else {
 		// If ThrottleMinutes is negative (e.g., -1), effectively disable throttling beyond the initial trigger
@@ -226,8 +226,8 @@ SELECT
     '%s' AS rule_id,
     fe.%s AS entity_id,
     '%s' AS state,
-    fe._tp_time AS created_at,
-    fe._tp_time AS updated_at,
+    coalesce(fe.ack_created_at, now()) AS created_at,
+    now() AS updated_at,
     '' AS updated_by,
     %s AS comment
 FROM filtered_events AS fe`,

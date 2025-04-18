@@ -29,6 +29,7 @@ type TimeplusClient interface {
 	IsAlertAcknowledged(ctx context.Context, alertID string) (bool, error)
 	CreateRuleResultsStream(ctx context.Context, ruleID string) error
 	ExecuteDDL(ctx context.Context, query string) error
+	EnsureMutableStream(ctx context.Context, streamName string, schema []Column, primaryKeys []string) error
 }
 
 // Ensure Client implements TimeplusClient

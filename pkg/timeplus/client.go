@@ -767,3 +767,57 @@ func (c *Client) ExecuteDDL(ctx context.Context, query string) error {
 	}
 	return nil
 }
+
+// EnsureMutableStream ensures a mutable stream with the specified schema and primary key exists.
+func (c *Client) EnsureMutableStream(ctx context.Context, streamName string, schema []Column, primaryKeys []string) error {
+	// Efficiently check if stream exists using direct query
+	exists, err := c.CheckStreamExists(ctx, streamName)
+	if err != nil {
+		return fmt.Errorf("failed to check if stream '%s' exists: %w", streamName, err)
+	}
+
+	if exists {
+		logrus.Debugf("Mutable stream '%s' already exists", streamName)
+		return nil // Nothing to do
+	}
+
+	logrus.Infof("Creating mutable stream: %s", streamName)
+
+	// Build columns string for schema
+	columnsStr := ""
+	for i, col := range schema {
+		if i > 0 {
+			columnsStr += ", "
+		}
+		nullableStr := ""
+		if col.Nullable {
+			nullableStr = " NULL"
+		}
+		columnsStr += fmt.Sprintf("`%s` %s%s", col.Name, col.Type, nullableStr)
+	}
+
+	// Build primary key string
+	primaryKeyStr := ""
+	if len(primaryKeys) > 0 {
+		pkParts := make([]string, len(primaryKeys))
+		for i, key := range primaryKeys {
+			pkParts[i] = fmt.Sprintf("`%s`", key)
+		}
+		primaryKeyStr = fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkParts, ", "))
+	} else {
+		return fmt.Errorf("mutable streams require at least one primary key column")
+	}
+
+	// Construct the full DDL query
+	query := fmt.Sprintf("CREATE MUTABLE STREAM `%s` (%s) %s",
+		streamName, columnsStr, primaryKeyStr)
+
+	// Execute the DDL
+	err = c.conn.Exec(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to create mutable stream '%s': %w", streamName, err)
+	}
+
+	logrus.Infof("Successfully created mutable stream '%s'", streamName)
+	return nil
+}
