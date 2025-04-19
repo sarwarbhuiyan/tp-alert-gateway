@@ -374,16 +374,16 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 	var dedicatedAlertAcksStream interface{}
 	if rule.DedicatedAlertAcksStream != nil {
 		dedicatedAlertAcksStream = *rule.DedicatedAlertAcksStream // Use the pointer's value
+		logrus.Debugf("PERSIST_RULE: Using provided DedicatedAlertAcksStream value: %v", *rule.DedicatedAlertAcksStream)
 	} else {
 		// If the pointer is nil, determine value based on context (create vs update)
 		if active { // 'active' is true during initial creation persistence
 			dedicatedAlertAcksStream = false // Default to false if omitted during creation
+			logrus.Debugf("PERSIST_RULE: DedicatedAlertAcksStream is nil, defaulting to false for active rule")
 		} else {
 			// During updates or soft deletes (active=false), nil means no change/use existing DB value
-			// However, InsertIntoStream might require an explicit value or handle nil correctly.
-			// Let's assume nil is okay for updates where the field wasn't provided.
-			// If the DB column doesn't allow NULL, this needs adjustment.
 			dedicatedAlertAcksStream = nil // Represent as NULL for updates if omitted
+			logrus.Debugf("PERSIST_RULE: DedicatedAlertAcksStream is nil for inactive rule, using nil value")
 		}
 	}
 
@@ -393,7 +393,12 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 		// Type assert the interface{} back to bool
 		if val, ok := dedicatedAlertAcksStream.(bool); ok {
 			dedicatedStreamValue = val
+			logrus.Debugf("PERSIST_RULE: Successfully type-asserted DedicatedAlertAcksStream to bool: %v", val)
+		} else {
+			logrus.Warnf("PERSIST_RULE: Failed to type-assert DedicatedAlertAcksStream to bool, defaulting to false")
 		}
+	} else {
+		logrus.Debugf("PERSIST_RULE: DedicatedAlertAcksStream is nil, using default boolean value: false")
 	}
 
 	// Handle nullable string for AlertAcksStreamName
@@ -441,7 +446,13 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 
 	// Use the client's InsertIntoStream method
 	err := s.tpClient.InsertIntoStream(ctx, s.ruleStream, columns, values)
-	return err
+	if err != nil {
+		logrus.Errorf("PERSIST_RULE: Error inserting into stream: %v", err)
+		return err
+	}
+
+	logrus.Debugf("PERSIST_RULE: Successfully persisted rule %s with DedicatedStreamFlag=%v", rule.ID, dedicatedStreamValue)
+	return nil
 }
 
 // UpdateRule updates an existing rule
@@ -495,30 +506,66 @@ func (s *RuleService) UpdateRule(ctx context.Context, id string, req *models.Upd
 
 // DeleteRule deletes a rule
 func (s *RuleService) DeleteRule(ctx context.Context, id string) error {
+	logrus.Debugf("DELETE_RULE: Starting deletion of rule %s", id)
+
 	// First, stop the rule if it's running
 	if err := s.StopRule(ctx, id); err != nil {
 		logrus.Warnf("Error stopping rule %s before deletion: %v", id, err)
+		// Continue with deletion even if stop fails
 	}
 
 	// Get the rule
 	rule, err := s.GetRule(id)
 	if err != nil {
+		logrus.Errorf("DELETE_RULE: Failed to get rule %s: %v", id, err)
 		return err
 	}
+
+	logrus.Debugf("DELETE_RULE: Retrieved rule %s for deletion, status=%s", rule.ID, rule.Status)
 
 	// Cleanup Timeplus resources
 	if err := s.tpClient.DeleteMaterializedView(ctx, rule.ViewName); err != nil {
 		logrus.Warnf("Error deleting materialized view %s: %v", rule.ViewName, err)
+		// Continue with other cleanup operations
+	} else {
+		logrus.Debugf("DELETE_RULE: Successfully deleted materialized view %s", rule.ViewName)
 	}
 
 	// Delete the alert acks view as well
 	acksViewName := fmt.Sprintf("rule_%s_acks_view", rule.ID)
 	if err := s.tpClient.DeleteMaterializedView(ctx, acksViewName); err != nil {
 		logrus.Warnf("Error deleting alert acks view %s: %v", acksViewName, err)
+		// Continue with other cleanup operations
+	} else {
+		logrus.Debugf("DELETE_RULE: Successfully deleted alert acks view %s", acksViewName)
+	}
+
+	// Delete dedicated alert acks stream if it exists
+	if rule.DedicatedAlertAcksStream != nil && *rule.DedicatedAlertAcksStream {
+		dedicatedStreamName := ""
+		if rule.AlertAcksStreamName != "" {
+			dedicatedStreamName = rule.AlertAcksStreamName
+		} else {
+			sanitizedRuleID := GetFormattedRuleID(rule.ID)
+			dedicatedStreamName = fmt.Sprintf("rule_%s_alert_acks", sanitizedRuleID)
+		}
+
+		if dedicatedStreamName != "" {
+			logrus.Debugf("DELETE_RULE: Attempting to delete dedicated alert acks stream: %s", dedicatedStreamName)
+			if err := s.tpClient.DeleteStream(ctx, dedicatedStreamName); err != nil {
+				logrus.Warnf("Error deleting dedicated alert acks stream %s: %v", dedicatedStreamName, err)
+				// Continue with other cleanup operations
+			} else {
+				logrus.Debugf("DELETE_RULE: Successfully deleted dedicated alert acks stream %s", dedicatedStreamName)
+			}
+		}
 	}
 
 	if err := s.tpClient.DeleteStream(ctx, rule.ResultStream); err != nil {
 		logrus.Warnf("Error deleting result stream %s: %v", rule.ResultStream, err)
+		// Continue with other cleanup operations
+	} else {
+		logrus.Debugf("DELETE_RULE: Successfully deleted result stream %s", rule.ResultStream)
 	}
 
 	// Mark the rule as inactive rather than physically deleting it
@@ -526,10 +573,13 @@ func (s *RuleService) DeleteRule(ctx context.Context, id string) error {
 	rule.Status = models.RuleStatusStopped
 	rule.UpdatedAt = time.Now()
 
+	logrus.Debugf("DELETE_RULE: Marking rule %s as inactive", rule.ID)
 	if err := s.persistRule(ctx, rule, false); err != nil {
+		logrus.Errorf("DELETE_RULE: Failed to mark rule as deleted: %v", err)
 		return fmt.Errorf("failed to mark rule as deleted: %w", err)
 	}
 
+	logrus.Infof("DELETE_RULE: Successfully deleted rule %s", rule.ID)
 	return nil
 }
 
@@ -553,6 +603,9 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 		return err
 	}
 
+	logrus.Debugf("START_RULE: Starting rule %s, current state: Status=%s, DedicatedAlertAcksStream=%v",
+		rule.ID, rule.Status, rule.DedicatedAlertAcksStream)
+
 	// Already running
 	if rule.Status == models.RuleStatusRunning {
 		return nil
@@ -575,6 +628,13 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	// Determine target alert stream name based on rule config
 	targetAlertStreamName := timeplus.AlertAcksMutableStream // Default to global
 	useDedicatedStream := false
+
+	if rule.DedicatedAlertAcksStream != nil {
+		logrus.Debugf("START_RULE: DedicatedAlertAcksStream pointer value: %v", *rule.DedicatedAlertAcksStream)
+	} else {
+		logrus.Debugf("START_RULE: DedicatedAlertAcksStream pointer is nil")
+	}
+
 	if rule.AlertAcksStreamName != "" { // Explicit name overrides everything
 		targetAlertStreamName = rule.AlertAcksStreamName
 		useDedicatedStream = true
@@ -586,6 +646,9 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	} else {
 		logrus.Infof("Using global alert acks stream: %s", targetAlertStreamName)
 	}
+
+	logrus.Debugf("START_RULE: Determined useDedicatedStream=%v, targetAlertStreamName=%s",
+		useDedicatedStream, targetAlertStreamName)
 
 	// Step 0: Ensure the target mutable alert acks stream exists if it's not the global one
 	if useDedicatedStream {
@@ -904,7 +967,13 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 
 	// Explicitly set the pointer value based on the determined logic
 	// This ensures the correct value is persisted even if the original pointer was lost/overwritten.
-	rule.DedicatedAlertAcksStream = &useDedicatedStream
+	trueValue := useDedicatedStream // Create a copy to avoid potential issues with the reference
+	rule.DedicatedAlertAcksStream = &trueValue
+
+	// Update the AlertAcksStreamName if using a dedicated stream
+	if useDedicatedStream && rule.AlertAcksStreamName == "" {
+		rule.AlertAcksStreamName = targetAlertStreamName
+	}
 
 	// Log the value being persisted
 	var dedicatedFlagValue string
@@ -913,13 +982,16 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	} else {
 		dedicatedFlagValue = fmt.Sprintf("%t", *rule.DedicatedAlertAcksStream)
 	}
-	logrus.Debugf("RULE_SERVICE: Final persist in StartRule for rule %s. Status: %s, DedicatedFlagPointerValue: %s", rule.ID, rule.Status, dedicatedFlagValue)
+	logrus.Debugf("START_RULE: Final persist in StartRule for rule %s. Status: %s, DedicatedFlagPointerValue: %s, AlertAcksStreamName: %s",
+		rule.ID, rule.Status, dedicatedFlagValue, rule.AlertAcksStreamName)
 
 	// Persist the final state
 	if err := s.persistRule(ctx, rule, true); err != nil {
+		logrus.Errorf("START_RULE: Failed to update rule status: %v", err)
 		return fmt.Errorf("failed to update rule status: %w", err)
 	}
 
+	logrus.Infof("START_RULE: Successfully started rule %s with dedicated stream flag: %v", rule.ID, dedicatedFlagValue)
 	return nil
 }
 

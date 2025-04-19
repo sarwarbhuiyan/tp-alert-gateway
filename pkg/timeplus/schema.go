@@ -212,19 +212,19 @@ func GetRuleThrottledMaterializedViewQuery(
 
 	// Use CTE to resolve potential column name conflicts and clarify logic
 	query := fmt.Sprintf(`
-CREATE MATERIALIZED VIEW %s INTO %s AS
+CREATE MATERIALIZED VIEW `+"`%s`"+` INTO `+"`%s`"+` AS
 WITH filtered_events AS (
     SELECT
         view.*,
         ack.state AS ack_state,
         ack.created_at AS ack_created_at
-    FROM %s AS view
-    LEFT JOIN %s AS ack ON view.%s = ack.entity_id
+    FROM `+"`%s`"+` AS view
+    LEFT JOIN `+"`%s`"+` AS ack ON view.`+"`%s`"+` = ack.entity_id
     WHERE (ack.rule_id = '') OR (ack.rule_id = '%s' AND (%s))
 )
 SELECT
     '%s' AS rule_id,
-    fe.%s AS entity_id,
+    fe.`+"`%s`"+` AS entity_id,
     '%s' AS state,
     coalesce(fe.ack_created_at, now()) AS created_at,
     now() AS updated_at,

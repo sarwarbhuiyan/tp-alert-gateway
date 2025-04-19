@@ -1,1 +1,0 @@
-{"name":"Test High Temp","description":"Test rule for high temperatures","query":"SELECT * FROM device_temperatures WHERE temperature > 38","source_stream":"device_temperatures","severity":"high","throttle_minutes":5}

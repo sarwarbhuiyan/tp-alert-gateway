@@ -1,9 +1,0 @@
-server:
-  port: "8080"
-  allowedOrigins: "*"
-  shutdownTimeout: 15
-
-timeplus:
-  address: "timeplus:8464"  # Service name in Docker Compose with port
-  apiKey: ""                # No auth needed for local Timeplus
-  workspace: "default" 

@@ -3,7 +3,7 @@
 echo "Cleaning up Timeplus streams and views"
 
 # Drop test streams
-STREAMS=$(docker exec timeplus timeplusd client --user test --password test123 --query="SELECT name FROM system.tables WHERE engine = 'Stream' AND name NOT IN ('license_validation_log', 'stream_metric_log', 'stream_state_log')" | grep -v "^COLUMNS\|^SCHEMATA\|^TABLES\|^VIEWS")
+STREAMS=$(docker exec timeplus timeplusd client --user test --password test123 --query="SELECT name FROM system.tables WHERE engine = 'MutableStream' OR  engine = 'Stream' AND name NOT IN ('license_validation_log', 'stream_metric_log', 'stream_state_log')" | grep -v "^COLUMNS\|^SCHEMATA\|^TABLES\|^VIEWS")
 
 for stream in $STREAMS; do
     # Need to handle names with dashes by quoting them
@@ -12,11 +12,20 @@ for stream in $STREAMS; do
 done
 
 # Drop views (if any)
+VIEWS=$(docker exec timeplus timeplusd client --user test --password test123 --query="SELECT name FROM system.tables WHERE engine = 'MaterializedView' AND name NOT IN ('COLUMNS', 'SCHEMATA', 'TABLES', 'VIEWS', 'columns', 'schemata', 'tables', 'views')")
+
+for view in $VIEWS; do
+    echo "Dropping view: $view"
+    docker exec timeplus timeplusd client --user test --password test123 --query="DROP VIEW \`$view\`"
+done
+
+
+# Drop views (if any)
 VIEWS=$(docker exec timeplus timeplusd client --user test --password test123 --query="SELECT name FROM system.tables WHERE engine = 'View' AND name NOT IN ('COLUMNS', 'SCHEMATA', 'TABLES', 'VIEWS', 'columns', 'schemata', 'tables', 'views')")
 
 for view in $VIEWS; do
     echo "Dropping view: $view"
-    docker exec timeplus timeplusd client --user test --password test123 --query="DROP VIEW IF EXISTS \`$view\`"
+    docker exec timeplus timeplusd client --user test --password test123 --query="DROP VIEW \`$view\`"
 done
 
 # Drop materialized views (if any)
