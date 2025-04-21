@@ -23,15 +23,18 @@ Create a configuration file `config.yaml` with your Timeplus credentials:
 
 ```yaml
 server:
-  port: "8080"
+  port: 8080  # Port for the alert gateway server
   allowedOrigins: "*"
-  shutdownTimeout: 15
+  shutdownTimeout: 15  # Shutdown timeout in seconds
 
 timeplus:
-  address: "localhost" # Host address for Timeplus/Proton, without port or protocol
-  apiKey: "your-api-key-here" # For Proton, this can be empty if no authentication
-  workspace: "default"
+  address: "localhost:8464"  # Timeplus native protocol address with port
+  username: "your-username"  # Username for Timeplus authentication
+  password: "your-password"  # Password for Timeplus authentication
+  workspace: "default"       # Timeplus workspace name
 ```
+
+For local development, you can create a `config.local.yaml` file with test credentials.
 
 ### Building and Running
 
