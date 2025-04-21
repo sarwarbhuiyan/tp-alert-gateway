@@ -44,7 +44,6 @@ type Rule struct {
 	AlertAcksStreamName      string `json:"alertAcksStreamName,omitempty"`      // Explicit stream name (overrides dedicated flag)
 
 	// Timeplus resource references
-	SourceStream string `json:"sourceStream,omitempty"`
 	ResultStream string `json:"resultStream,omitempty"`
 	ViewName     string `json:"viewName,omitempty"`
 
@@ -72,8 +71,7 @@ type CreateRuleRequest struct {
 	Query                    string       `json:"query"`
 	Severity                 RuleSeverity `json:"severity"`
 	ThrottleMinutes          int          `json:"throttleMinutes"`
-	EntityIDColumns          string       `json:"entityIdColumns"` // Comma-separated list of columns to use as entity_id
-	SourceStream             string       `json:"sourceStream,omitempty"`
+	EntityIDColumns          string       `json:"entityIdColumns"`                    // Comma-separated list of columns to use as entity_id
 	DedicatedAlertAcksStream *bool        `json:"dedicatedAlertAcksStream,omitempty"` // Optional
 	AlertAcksStreamName      string       `json:"alertAcksStreamName,omitempty"`      // Optional
 }

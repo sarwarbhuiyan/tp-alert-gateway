@@ -185,7 +185,6 @@ func createSimpleTestRule(ctx context.Context, ruleService *services.RuleService
 		Query:           fmt.Sprintf("SELECT device_id, value FROM `%s` WHERE value > 50", streamName),
 		ThrottleMinutes: 0,
 		EntityIDColumns: "device_id",
-		SourceStream:    streamName,
 	}
 
 	return ruleService.CreateRule(ctx, req)

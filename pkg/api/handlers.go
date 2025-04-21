@@ -84,9 +84,9 @@ func (h *APIHandler) CreateRule(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request format"})
 	}
 
-	// Validate request
-	if req.Name == "" || req.Query == "" || req.SourceStream == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Name, query, and source_stream are required"})
+	// Validate request - removed sourceStream requirement
+	if req.Name == "" || req.Query == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Name and query are required"})
 	}
 
 	// Create rule

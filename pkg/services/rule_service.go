@@ -84,17 +84,12 @@ func ensureRuleStream(ctx context.Context, tpClient timeplus.TimeplusClient) err
 			{Name: "created_at", Type: "datetime64"},
 			{Name: "updated_at", Type: "datetime64"},
 			{Name: "last_triggered_at", Type: "datetime64", Nullable: true},
-			{Name: "source_stream", Type: "string"},
 			{Name: "result_stream", Type: "string"},
 			{Name: "view_name", Type: "string"},
 			{Name: "last_error", Type: "string", Nullable: true},
-			// New fields for alert ack stream config
-			{Name: "dedicated_alert_acks_stream", Type: "bool", Nullable: true}, // Store *bool as nullable bool
-			{Name: "alert_acks_stream_name", Type: "string", Nullable: true},    // Store optional string as nullable
-			// Internal fields
+			{Name: "dedicated_alert_acks_stream", Type: "bool", Nullable: true},
+			{Name: "alert_acks_stream_name", Type: "string", Nullable: true},
 			{Name: "_tp_time", Type: "datetime64"},
-			// {Name: "active", Type: "bool"}, // 'active' flag might not be needed with mutable stream PK logic?
-			// Let's keep it for now for soft deletes in DeleteRule.
 			{Name: "active", Type: "bool"},
 		}
 
@@ -174,11 +169,11 @@ func (s *RuleService) resumeRunningRules(ctx context.Context) error {
 func (s *RuleService) GetRules() ([]*models.Rule, error) {
 	ctx := context.Background()
 
-	// Query to get the latest version of each active rule
+	// Query to get the latest version of each active rule - removed source_stream
 	query := fmt.Sprintf(`
 		SELECT id, name, description, query, status, severity, 
 			   throttle_minutes, entity_id_columns, created_at, updated_at, last_triggered_at,
-			   source_stream, result_stream, view_name, last_error,
+			   result_stream, view_name, last_error,
 			   dedicated_alert_acks_stream, alert_acks_stream_name
 		FROM (
 			SELECT *, row_number() OVER (PARTITION BY id ORDER BY _tp_time DESC) as row_num
@@ -201,10 +196,12 @@ func (s *RuleService) GetRules() ([]*models.Rule, error) {
 	return rules, nil
 }
 
-// mapToRule converts a map of query results to a Rule struct
+// mapToRule maps a data map to a Rule struct
 func mapToRule(data map[string]interface{}) *models.Rule {
-	logrus.Debugf("MAP_TO_RULE: Input data map: %+v", data) // Log input data
+	// Log the raw data for debugging
+	logrus.Debugf("MAP_TO_RULE: Input data map: %v", data)
 
+	// Create a new rule
 	rule := &models.Rule{
 		ID:              getString(data, "id"),
 		Name:            getString(data, "name"),
@@ -214,32 +211,27 @@ func mapToRule(data map[string]interface{}) *models.Rule {
 		Severity:        models.RuleSeverity(getString(data, "severity")),
 		ThrottleMinutes: getInt(data, "throttle_minutes"),
 		EntityIDColumns: getString(data, "entity_id_columns"),
-		SourceStream:    getString(data, "source_stream"),
 		ResultStream:    getString(data, "result_stream"),
 		ViewName:        getString(data, "view_name"),
 		LastError:       getString(data, "last_error"),
-		// Map AlertAcksStreamName directly (handles null from DB)
-		AlertAcksStreamName: getString(data, "alert_acks_stream_name"),
 	}
 
-	// Debugging the boolean mapping
-	dedicatedValRaw, dedicatedExists := data["dedicated_alert_acks_stream"]
-	logrus.Debugf("MAP_TO_RULE [%s]: Raw 'dedicated_alert_acks_stream' value: %v (exists: %t, type: %T)",
-		rule.ID, dedicatedValRaw, dedicatedExists, dedicatedValRaw)
+	// Handle special fields: dedicated_alert_acks_stream (pointer to bool)
+	if dedicatedStreamRaw, ok := data["dedicated_alert_acks_stream"]; ok && dedicatedStreamRaw != nil {
+		// Debug raw value
+		logrus.Debugf("MAP_TO_RULE [%s]: Raw 'dedicated_alert_acks_stream' value: %v (exists: %v, type: %T)",
+			rule.ID, dedicatedStreamRaw, ok, dedicatedStreamRaw)
 
-	// Handle nullable boolean DedicatedAlertAcksStream
-	if val, ok := data["dedicated_alert_acks_stream"]; ok && val != nil {
-		// Check if it's already a pointer to bool (as seen in debug logs)
-		if boolPtr, ok := val.(*bool); ok {
-			rule.DedicatedAlertAcksStream = boolPtr // Assign the pointer directly
-		} else if boolVal, ok := val.(bool); ok { // Check if it's a direct bool (fallback)
-			rule.DedicatedAlertAcksStream = &boolVal // Create a pointer to the bool value
-		} else {
-			logrus.Warnf("MAP_TO_RULE [%s]: Unexpected type for dedicated_alert_acks_stream: %T", rule.ID, val)
+		// Try to convert to bool
+		if dedicatedStream, ok := dedicatedStreamRaw.(bool); ok {
+			rule.DedicatedAlertAcksStream = &dedicatedStream
 		}
-	} // If val is nil or not present, rule.DedicatedAlertAcksStream remains nil (default)
+	}
 
-	// Handle dates
+	// Handle alert_acks_stream_name
+	rule.AlertAcksStreamName = getString(data, "alert_acks_stream_name")
+
+	// Parse time fields
 	if createdAt, ok := data["created_at"].(time.Time); ok {
 		rule.CreatedAt = createdAt
 	}
@@ -282,11 +274,11 @@ func getInt(data map[string]interface{}, key string) int {
 func (s *RuleService) GetRule(id string) (*models.Rule, error) {
 	ctx := context.Background()
 
-	// Query to get the latest version of the specified rule
+	// Query to get the latest version of the specified rule - removed source_stream
 	query := fmt.Sprintf(`
 		SELECT id, name, description, query, status, severity, 
 			   throttle_minutes, entity_id_columns, created_at, updated_at, last_triggered_at,
-			   source_stream, result_stream, view_name, last_error,
+			   result_stream, view_name, last_error,
 			   dedicated_alert_acks_stream, alert_acks_stream_name
 		FROM (
 			SELECT *, row_number() OVER (PARTITION BY id ORDER BY _tp_time DESC) as row_num
@@ -333,7 +325,6 @@ func (s *RuleService) CreateRule(ctx context.Context, req *models.CreateRuleRequ
 		EntityIDColumns:          req.EntityIDColumns,
 		CreatedAt:                now,
 		UpdatedAt:                now,
-		SourceStream:             req.SourceStream,
 		ResultStream:             fmt.Sprintf("rule_%s_results", sanitizedRuleID),
 		ViewName:                 fmt.Sprintf("rule_%s_view", sanitizedRuleID),
 		DedicatedAlertAcksStream: &dedicatedStream,        // Store the determined value
@@ -409,16 +400,16 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 		alertAcksStreamName = nil // Use nil for database NULL
 	}
 
-	// Define columns for insertion
+	// Define columns for insertion - removed source_stream
 	columns := []string{
 		"id", "name", "description", "query", "status", "severity", "throttle_minutes",
 		"entity_id_columns", "created_at", "updated_at", "last_triggered_at",
-		"source_stream", "result_stream", "view_name", "last_error",
+		"result_stream", "view_name", "last_error",
 		"dedicated_alert_acks_stream", "alert_acks_stream_name",
 		"active",
 	}
 
-	// Prepare values for insertion
+	// Prepare values for insertion - removed source_stream value
 	values := []interface{}{
 		rule.ID,
 		rule.Name,
@@ -431,7 +422,6 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 		rule.CreatedAt,
 		rule.UpdatedAt,
 		lastTriggeredAt, // Pass directly, InsertIntoStream handles formatting
-		rule.SourceStream,
 		rule.ResultStream,
 		rule.ViewName,
 		rule.LastError,

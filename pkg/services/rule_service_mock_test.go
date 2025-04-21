@@ -2,10 +2,10 @@ package services
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
@@ -120,6 +120,16 @@ func (m *MockClient) CreateRuleResultsStream(ctx context.Context, ruleID string)
 	return args.Error(0)
 }
 
+func (m *MockClient) EnsureMutableStream(ctx context.Context, streamName string, schema []timeplus.Column, primaryKeys []string) error {
+	args := m.Called(ctx, streamName, schema, primaryKeys)
+	return args.Error(0)
+}
+
+func (m *MockClient) ExecuteDDL(ctx context.Context, query string) error {
+	args := m.Called(ctx, query)
+	return args.Error(0)
+}
+
 func TestGetRulesWithMock(t *testing.T) {
 	// Skip the test if testing.Short() is true - useful for CI/CD
 	if testing.Short() {
@@ -149,11 +159,11 @@ func TestGetRulesWithMock(t *testing.T) {
 
 	// Verify that the query includes table() for one-off queries
 	mockClient.On("ExecuteQuery", mock.Anything, mock.MatchedBy(func(query string) bool {
-		return contains(query, "FROM table(tp_rules)")
+		return strings.Contains(query, "FROM table(tp_rules)")
 	})).Return(mockRuleData, nil)
 
 	// Create a rule service with the mock client
-	service := &RuleService{
+	service := RuleService{
 		tpClient:    mockClient,
 		ruleStream:  "tp_rules",
 		alertStream: "tp_alerts",
@@ -182,35 +192,59 @@ func TestGetAlertWithMock(t *testing.T) {
 	// Create a mock client
 	mockClient := new(MockClient)
 
-	// Setup mock response for the ExecuteQuery call
-	mockAlertData := []map[string]interface{}{
+	// Setup mock response for the rule query
+	mockRuleData := []map[string]interface{}{
 		{
-			"id":              uuid.New().String(),
-			"rule_id":         "rule1",
-			"rule_name":       "Test Rule",
-			"severity":        "warning",
-			"triggered_at":    time.Now().Add(-30 * time.Minute),
-			"data":            "{\"value\": 100}",
-			"acknowledged":    false,
-			"acknowledged_at": nil,
-			"acknowledged_by": "",
+			"id":               "rule1",
+			"name":             "Test Rule",
+			"description":      "Test Description",
+			"query":            "SELECT * FROM test_stream",
+			"status":           "running",
+			"severity":         "warning",
+			"throttle_minutes": int32(5),
+			"created_at":       time.Now().Add(-1 * time.Hour),
+			"updated_at":       time.Now(),
+			"result_stream":    "rule_rule1_results",
+			"view_name":        "rule_rule1_view",
 		},
 	}
 
-	// Verify that the query includes table() for one-off queries
+	// Mock the query for GetRule
 	mockClient.On("ExecuteQuery", mock.Anything, mock.MatchedBy(func(query string) bool {
-		return contains(query, "FROM table(tp_alerts)")
+		return strings.Contains(query, "FROM table(tp_rules)") &&
+			strings.Contains(query, "WHERE id = 'rule1'")
+	})).Return(mockRuleData, nil)
+
+	// Setup mock response for the ExecuteQuery call for the alert data
+	mockAlertData := []map[string]interface{}{
+		{
+			"id":         "rule1:entity123",
+			"rule_id":    "rule1",
+			"entity_id":  "entity123",
+			"state":      "active",
+			"created_at": time.Now().Add(-30 * time.Minute),
+			"updated_at": time.Now(),
+			"updated_by": "",
+			"comment":    "{\"value\": 100}",
+		},
+	}
+
+	// Use a more specific matcher for the ExecuteQuery call
+	mockClient.On("ExecuteQuery", mock.Anything, mock.MatchedBy(func(query string) bool {
+		return strings.Contains(query, "FROM table("+timeplus.AlertAcksMutableStream+")") &&
+			strings.Contains(query, "WHERE rule_id = 'rule1'") &&
+			strings.Contains(query, "AND entity_id = 'entity123'")
 	})).Return(mockAlertData, nil)
 
 	// Create a rule service with the mock client
-	service := &RuleService{
+	service := RuleService{
 		tpClient:    mockClient,
 		ruleStream:  "tp_rules",
 		alertStream: "tp_alerts",
 	}
 
-	// Call GetAlert
-	alert, err := service.GetAlert("any-id")
+	// Call GetAlert with properly formatted ID (rule_id:entity_id)
+	alert, err := service.GetAlert("rule1:entity123")
 
 	// Assert expectations
 	assert.NoError(t, err)
@@ -218,6 +252,113 @@ func TestGetAlertWithMock(t *testing.T) {
 	assert.Equal(t, "Test Rule", alert.RuleName)
 	assert.Equal(t, models.RuleSeverity("warning"), alert.Severity)
 	assert.False(t, alert.Acknowledged)
+	assert.Empty(t, alert.AcknowledgedBy)
+
+	// Verify that all expected mock calls were made
+	mockClient.AssertExpectations(t)
+}
+
+func TestAcknowledgeAlertWithMock(t *testing.T) {
+	// Create a mock client
+	mockClient := new(MockClient)
+
+	// Setup mock response for the rule query
+	mockRuleData := []map[string]interface{}{
+		{
+			"id":               "rule1",
+			"name":             "Test Rule",
+			"description":      "Test Description",
+			"query":            "SELECT * FROM test_stream",
+			"status":           "running",
+			"severity":         "warning",
+			"throttle_minutes": int32(5),
+			"created_at":       time.Now().Add(-1 * time.Hour),
+			"updated_at":       time.Now(),
+			"result_stream":    "rule_rule1_results",
+			"view_name":        "rule_rule1_view",
+		},
+	}
+
+	// Mock the query for GetRule
+	mockClient.On("ExecuteQuery", mock.Anything, mock.MatchedBy(func(query string) bool {
+		return strings.Contains(query, "FROM table(tp_rules)") &&
+			strings.Contains(query, "WHERE id = 'rule1'")
+	})).Return(mockRuleData, nil)
+
+	// Setup mock response for GetActiveAlertAcks
+	activeAlertsData := []map[string]interface{}{
+		{
+			"rule_id":    "rule1",
+			"entity_id":  "entity123",
+			"state":      timeplus.AlertStateActive,
+			"created_at": time.Now().Add(-1 * time.Hour),
+			"updated_at": time.Now().Add(-1 * time.Hour),
+		},
+	}
+
+	// Mock the query to check for active alerts
+	mockClient.On("ExecuteQuery", mock.Anything, mock.MatchedBy(func(query string) bool {
+		return strings.Contains(query, "SELECT * FROM table("+timeplus.AlertAcksMutableStream+")") &&
+			strings.Contains(query, "WHERE") &&
+			strings.Contains(query, "rule_id = 'rule1'") &&
+			strings.Contains(query, "entity_id = 'entity123'") &&
+			strings.Contains(query, "state = '"+timeplus.AlertStateActive+"'")
+	})).Return(activeAlertsData, nil)
+
+	// Mock the query to acknowledge the alert
+	mockClient.On("ExecuteQuery", mock.Anything, mock.MatchedBy(func(query string) bool {
+		return strings.Contains(query, "INSERT INTO "+timeplus.AlertAcksMutableStream) &&
+			strings.Contains(query, "rule_id") &&
+			strings.Contains(query, "entity_id") &&
+			strings.Contains(query, "state") &&
+			strings.Contains(query, "'rule1'") &&
+			strings.Contains(query, "'entity123'") &&
+			strings.Contains(query, "'"+timeplus.AlertStateAcknowledged+"'") &&
+			strings.Contains(query, "'test-user'")
+	})).Return([]map[string]interface{}{}, nil)
+
+	// Setup mock response for after acknowledgment
+	acknowledgedAlertData := []map[string]interface{}{
+		{
+			"id":         "rule1:entity123",
+			"rule_id":    "rule1",
+			"entity_id":  "entity123",
+			"state":      timeplus.AlertStateAcknowledged,
+			"created_at": time.Now().Add(-1 * time.Hour),
+			"updated_at": time.Now(),
+			"updated_by": "test-user",
+			"comment":    "Acknowledged via API",
+		},
+	}
+
+	// Mock the query to get the acknowledged alert
+	mockClient.On("ExecuteQuery", mock.Anything, mock.MatchedBy(func(query string) bool {
+		return strings.Contains(query, "FROM table("+timeplus.AlertAcksMutableStream+")") &&
+			strings.Contains(query, "WHERE rule_id = 'rule1'") &&
+			strings.Contains(query, "AND entity_id = 'entity123'") &&
+			strings.Contains(query, "ORDER BY updated_at DESC")
+	})).Return(acknowledgedAlertData, nil)
+
+	// Remove the direct mock for GetRule since we're mocking the underlying query
+	// Create a rule service with the mock client
+	service := &RuleService{
+		tpClient:    mockClient,
+		ruleStream:  "tp_rules",
+		alertStream: "tp_alerts",
+	}
+
+	// Step 1: Acknowledge the alert
+	err := service.AcknowledgeAlert("rule1:entity123", "test-user")
+	assert.NoError(t, err)
+
+	// Step 2: Get the alert to verify it's acknowledged
+	alert, err := service.GetAlert("rule1:entity123")
+	assert.NoError(t, err)
+	assert.Equal(t, "rule1", alert.RuleID)
+	assert.Equal(t, "Test Rule", alert.RuleName)
+	assert.True(t, alert.Acknowledged)
+	assert.Equal(t, "test-user", alert.AcknowledgedBy)
+	assert.NotNil(t, alert.AcknowledgedAt)
 
 	// Verify that all expected mock calls were made
 	mockClient.AssertExpectations(t)

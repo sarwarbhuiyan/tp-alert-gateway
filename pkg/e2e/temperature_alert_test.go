@@ -232,7 +232,6 @@ func createTemperatureRule(
 		Query:           fmt.Sprintf("SELECT device_id, temperature, timestamp FROM `%s` WHERE temperature > %.1f", streamName, threshold),
 		ThrottleMinutes: throttleMinutes,
 		EntityIDColumns: "device_id",
-		SourceStream:    streamName,
 	}
 
 	return ruleService.CreateRule(ctx, req)
