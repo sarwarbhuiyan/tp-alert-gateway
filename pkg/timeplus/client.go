@@ -619,11 +619,11 @@ func (c *Client) SetupMutableAlertAcksStream(ctx context.Context) error {
 		if i > 0 {
 			columnsStr += ", "
 		}
-		nullableStr := ""
+
 		if col.Nullable {
-			nullableStr = " NULL"
+			columnsStr += fmt.Sprintf("`%s` nullable(%s)", col.Name, col.Type)
 		}
-		columnsStr += fmt.Sprintf("`%s` %s%s", col.Name, col.Type, nullableStr)
+		columnsStr += fmt.Sprintf("`%s` %s", col.Name, col.Type)
 	}
 
 	query := fmt.Sprintf("CREATE MUTABLE STREAM %s (%s) PRIMARY KEY (rule_id, entity_id)",
@@ -789,11 +789,11 @@ func (c *Client) EnsureMutableStream(ctx context.Context, streamName string, sch
 		if i > 0 {
 			columnsStr += ", "
 		}
-		nullableStr := ""
 		if col.Nullable {
-			nullableStr = " NULL"
+			columnsStr += fmt.Sprintf("`%s` nullable(%s)", col.Name, col.Type)
+
 		}
-		columnsStr += fmt.Sprintf("`%s` %s%s", col.Name, col.Type, nullableStr)
+		columnsStr += fmt.Sprintf("`%s` %s", col.Name, col.Type)
 	}
 
 	// Build primary key string

@@ -63,7 +63,7 @@ func GetAlertAcksSchema() []Column {
 		{Name: "rule_id", Type: "string"},
 		{Name: "entity_id", Type: "string"}, // Generic identifier for the entity that triggered the alert
 		{Name: "state", Type: "string"},
-		{Name: "created_at", Type: "datetime64"},
+		{Name: "created_at", Type: "datetime64", Nullable: true},
 		{Name: "updated_at", Type: "datetime64"},
 		{Name: "updated_by", Type: "string", Nullable: true},
 		{Name: "comment", Type: "string", Nullable: true},
@@ -104,11 +104,11 @@ func GetCreateMutableStreamQuery(streamName string, columns []Column, primaryKey
 		if i > 0 {
 			columnsSQL += ",\n"
 		}
-		nullableStr := ""
+
 		if col.Nullable {
-			nullableStr = " NULL"
+			columnsSQL += fmt.Sprintf("  `%s` nullable(%s)", col.Name, col.Type)
 		}
-		columnsSQL += fmt.Sprintf("  `%s` %s%s", col.Name, col.Type, nullableStr)
+		columnsSQL += fmt.Sprintf("  `%s` %s", col.Name, col.Type)
 	}
 
 	primaryKeySQL := ""
@@ -126,37 +126,6 @@ func GetCreateMutableStreamQuery(streamName string, columns []Column, primaryKey
 	return fmt.Sprintf(`CREATE MUTABLE STREAM `+"`"+`%s`+"`"+` (
 %s
 ) %s`, streamName, columnsSQL, primaryKeySQL)
-}
-
-// GetAlertAcksViewQuery returns a SQL query to create a materialized view that updates the mutable alert_acks stream
-// Note: This query expects the source stream to have a field that can be used as an entity_id
-// The schema of the materialized view is dynamically extended based on the query results
-// If there is no entity_id field in the results, it will create one from available fields
-func GetAlertAcksViewQuery(ruleID, sourceStream string) string {
-	// Sanitize the rule ID for view name
-	sanitizedRuleID := strings.ReplaceAll(ruleID, "-", "_")
-
-	// Import the AlertStateActive constant from alert_acks.go
-	return fmt.Sprintf(`
-CREATE MATERIALIZED VIEW rule_%s_acks_view INTO %s AS 
-SELECT 
-	'%s' AS rule_id,
-	CASE 
-		WHEN hasColumn('entity_id') AND isNotNull(entity_id) THEN entity_id
-		WHEN hasColumn('device_id') AND isNotNull(device_id) THEN device_id
-		WHEN hasColumn('ip') AND isNotNull(ip) THEN ip
-		WHEN hasColumn('host') AND isNotNull(host) THEN host
-		WHEN hasColumn('user_id') AND isNotNull(user_id) THEN user_id 
-		WHEN hasColumn('id') AND isNotNull(id) THEN id
-		ELSE toString(now64(3)) 
-	END AS entity_id,
-	'active' AS state,
-	now() AS created_at,
-	now() AS updated_at,
-	'' AS updated_by,
-	'' AS comment
-FROM %s
-`, sanitizedRuleID, AlertAcksMutableStream, ruleID, sourceStream)
 }
 
 // GetAlertSchema returns the schema for the alerts stream
