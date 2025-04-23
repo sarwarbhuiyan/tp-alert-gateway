@@ -55,21 +55,6 @@ func GetRulesSchema() []Column {
 	}
 }
 
-// GetAlertAcksSchema returns the schema for the alert acknowledgments stream
-// Note: entity_id is a generic identifier for the entity that triggered the alert
-// This could be any meaningful identifier from your data sources (device IDs, IP addresses, user IDs, etc.)
-func GetAlertAcksSchema() []Column {
-	return []Column{
-		{Name: "rule_id", Type: "string"},
-		{Name: "entity_id", Type: "string"}, // Generic identifier for the entity that triggered the alert
-		{Name: "state", Type: "string"},
-		{Name: "created_at", Type: "datetime64", Nullable: true},
-		{Name: "updated_at", Type: "datetime64"},
-		{Name: "updated_by", Type: "string", Nullable: true},
-		{Name: "comment", Type: "string", Nullable: true},
-	}
-}
-
 // GetMutableAlertAcksSchema returns the schema for the mutable alert acknowledgments stream
 // The schema is generic and can accommodate any type of alert source, not just device data
 func GetMutableAlertAcksSchema() []Column {
@@ -95,37 +80,6 @@ func GetRuleAlertViewQuery(ruleID, ruleName, severity, sourceStream, whereClause
 FROM %s 
 WHERE %s`,
 		ruleID, ruleName, severity, sourceStream, whereClause)
-}
-
-// GetCreateMutableStreamQuery returns a SQL query to create a mutable stream
-func GetCreateMutableStreamQuery(streamName string, columns []Column, primaryKeys []string) string {
-	columnsSQL := ""
-	for i, col := range columns {
-		if i > 0 {
-			columnsSQL += ",\n"
-		}
-
-		if col.Nullable {
-			columnsSQL += fmt.Sprintf("  `%s` nullable(%s)", col.Name, col.Type)
-		}
-		columnsSQL += fmt.Sprintf("  `%s` %s", col.Name, col.Type)
-	}
-
-	primaryKeySQL := ""
-	if len(primaryKeys) > 0 {
-		primaryKeySQL = "PRIMARY KEY ("
-		for i, key := range primaryKeys {
-			if i > 0 {
-				primaryKeySQL += ", "
-			}
-			primaryKeySQL += fmt.Sprintf("`%s`", key)
-		}
-		primaryKeySQL += ")"
-	}
-
-	return fmt.Sprintf(`CREATE MUTABLE STREAM `+"`"+`%s`+"`"+` (
-%s
-) %s`, streamName, columnsSQL, primaryKeySQL)
 }
 
 // GetAlertSchema returns the schema for the alerts stream
@@ -210,6 +164,39 @@ FROM filtered_events AS fe`,
 		idColumnName,       // entity_id for final SELECT
 		AlertStateActive,   // state for final SELECT
 		triggeringDataExpr) // comment expression for final SELECT
+
+	return query
+}
+
+// GetRuleResolveViewQuery generates a SQL query for creating a materialized view
+// that will automatically acknowledge alerts when a resolve condition is met
+func GetRuleResolveViewQuery(
+	ruleID string,
+	idColumnName string,
+	targetAlertStream string, // The alert ack stream name
+) string {
+	sanitizedRuleID := strings.ReplaceAll(ruleID, "-", "_")
+	viewName := fmt.Sprintf("rule_%s_view", sanitizedRuleID)
+	mvName := fmt.Sprintf("rule_%s_resolve_mv", sanitizedRuleID)
+
+	// Create a view that inserts records with 'acknowledged' state
+	// based on the resolve query results
+	query := fmt.Sprintf(`
+CREATE MATERIALIZED VIEW `+"`%s`"+` INTO `+"`%s`"+` AS
+SELECT
+    '%s' AS rule_id,
+    `+"`%s`"+` AS entity_id,
+    '%s' AS state,
+    now() AS created_at,
+    now() AS updated_at,
+    'auto-resolver' AS updated_by,
+    '{"reason": "Auto-resolved by resolve query"}' AS comment
+FROM `+"`%s`"+``,
+		mvName, targetAlertStream, // View name and target stream
+		ruleID,                 // rule_id for INSERT
+		idColumnName,           // entity_id column from resolve query
+		AlertStateAcknowledged, // Set state to acknowledged
+		viewName)               // Source view with resolve query
 
 	return query
 }

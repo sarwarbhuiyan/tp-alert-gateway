@@ -31,6 +31,7 @@ type Rule struct {
 	Name            string       `json:"name"`
 	Description     string       `json:"description"`
 	Query           string       `json:"query"`
+	ResolveQuery    string       `json:"resolveQuery,omitempty"` // Query to auto-resolve alerts
 	Status          RuleStatus   `json:"status"`
 	Severity        RuleSeverity `json:"severity"`
 	ThrottleMinutes int          `json:"throttleMinutes"` // 0 means no throttling
@@ -44,8 +45,9 @@ type Rule struct {
 	AlertAcksStreamName      string `json:"alertAcksStreamName,omitempty"`      // Explicit stream name (overrides dedicated flag)
 
 	// Timeplus resource references
-	ResultStream string `json:"resultStream,omitempty"`
-	ViewName     string `json:"viewName,omitempty"`
+	ResultStream    string `json:"resultStream,omitempty"`
+	ViewName        string `json:"viewName,omitempty"`
+	ResolveViewName string `json:"resolveViewName,omitempty"` // View name for resolve query
 
 	// Error information if status is failed
 	LastError string `json:"lastError,omitempty"`
@@ -69,6 +71,7 @@ type CreateRuleRequest struct {
 	Name                     string       `json:"name"`
 	Description              string       `json:"description"`
 	Query                    string       `json:"query"`
+	ResolveQuery             string       `json:"resolveQuery,omitempty"`
 	Severity                 RuleSeverity `json:"severity"`
 	ThrottleMinutes          int          `json:"throttleMinutes"`
 	EntityIDColumns          string       `json:"entityIdColumns"`                    // Comma-separated list of columns to use as entity_id
@@ -81,6 +84,7 @@ type UpdateRuleRequest struct {
 	Name                     *string       `json:"name,omitempty"`
 	Description              *string       `json:"description,omitempty"`
 	Query                    *string       `json:"query,omitempty"`
+	ResolveQuery             *string       `json:"resolveQuery,omitempty"`
 	Severity                 *RuleSeverity `json:"severity,omitempty"`
 	ThrottleMinutes          *int          `json:"throttleMinutes,omitempty"`
 	EntityIDColumns          *string       `json:"entityIdColumns,omitempty"`          // Comma-separated list of columns to use as entity_id

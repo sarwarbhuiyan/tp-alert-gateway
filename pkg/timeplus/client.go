@@ -622,8 +622,9 @@ func (c *Client) SetupMutableAlertAcksStream(ctx context.Context) error {
 
 		if col.Nullable {
 			columnsStr += fmt.Sprintf("`%s` nullable(%s)", col.Name, col.Type)
+		} else {
+			columnsStr += fmt.Sprintf("`%s` %s", col.Name, col.Type)
 		}
-		columnsStr += fmt.Sprintf("`%s` %s", col.Name, col.Type)
 	}
 
 	query := fmt.Sprintf("CREATE MUTABLE STREAM %s (%s) PRIMARY KEY (rule_id, entity_id)",

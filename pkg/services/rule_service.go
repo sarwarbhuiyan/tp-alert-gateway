@@ -77,6 +77,7 @@ func ensureRuleStream(ctx context.Context, tpClient timeplus.TimeplusClient) err
 			{Name: "name", Type: "string"},
 			{Name: "description", Type: "string"},
 			{Name: "query", Type: "string"},
+			{Name: "resolve_query", Type: "string", Nullable: true},
 			{Name: "status", Type: "string"},
 			{Name: "severity", Type: "string"},
 			{Name: "throttle_minutes", Type: "int32"},
@@ -86,6 +87,7 @@ func ensureRuleStream(ctx context.Context, tpClient timeplus.TimeplusClient) err
 			{Name: "last_triggered_at", Type: "datetime64", Nullable: true},
 			{Name: "result_stream", Type: "string"},
 			{Name: "view_name", Type: "string"},
+			{Name: "resolve_view_name", Type: "string", Nullable: true},
 			{Name: "last_error", Type: "string", Nullable: true},
 			{Name: "dedicated_alert_acks_stream", Type: "bool", Nullable: true},
 			{Name: "alert_acks_stream_name", Type: "string", Nullable: true},
@@ -207,12 +209,14 @@ func mapToRule(data map[string]interface{}) *models.Rule {
 		Name:            getString(data, "name"),
 		Description:     getString(data, "description"),
 		Query:           getString(data, "query"),
+		ResolveQuery:    getString(data, "resolve_query"),
 		Status:          models.RuleStatus(getString(data, "status")),
 		Severity:        models.RuleSeverity(getString(data, "severity")),
 		ThrottleMinutes: getInt(data, "throttle_minutes"),
 		EntityIDColumns: getString(data, "entity_id_columns"),
 		ResultStream:    getString(data, "result_stream"),
 		ViewName:        getString(data, "view_name"),
+		ResolveViewName: getString(data, "resolve_view_name"),
 		LastError:       getString(data, "last_error"),
 	}
 
@@ -276,9 +280,9 @@ func (s *RuleService) GetRule(id string) (*models.Rule, error) {
 
 	// Query to get the latest version of the specified rule - removed source_stream
 	query := fmt.Sprintf(`
-		SELECT id, name, description, query, status, severity, 
+		SELECT id, name, description, query, resolve_query, status, severity, 
 			   throttle_minutes, entity_id_columns, created_at, updated_at, last_triggered_at,
-			   result_stream, view_name, last_error,
+			   result_stream, view_name, resolve_view_name, last_error,
 			   dedicated_alert_acks_stream, alert_acks_stream_name
 		FROM (
 			SELECT *, row_number() OVER (PARTITION BY id ORDER BY _tp_time DESC) as row_num
@@ -319,6 +323,7 @@ func (s *RuleService) CreateRule(ctx context.Context, req *models.CreateRuleRequ
 		Name:                     req.Name,
 		Description:              req.Description,
 		Query:                    req.Query,
+		ResolveQuery:             req.ResolveQuery,
 		Status:                   models.RuleStatusCreated,
 		Severity:                 req.Severity,
 		ThrottleMinutes:          req.ThrottleMinutes,
@@ -329,6 +334,11 @@ func (s *RuleService) CreateRule(ctx context.Context, req *models.CreateRuleRequ
 		ViewName:                 fmt.Sprintf("rule_%s_view", sanitizedRuleID),
 		DedicatedAlertAcksStream: &dedicatedStream,        // Store the determined value
 		AlertAcksStreamName:      req.AlertAcksStreamName, // Copy optional name
+	}
+
+	// Only set ResolveViewName if ResolveQuery is provided
+	if req.ResolveQuery != "" {
+		rule.ResolveViewName = fmt.Sprintf("rule_%s_resolve_view", sanitizedRuleID)
 	}
 
 	// Persist the rule to Timeplus
@@ -402,9 +412,9 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 
 	// Define columns for insertion - removed source_stream
 	columns := []string{
-		"id", "name", "description", "query", "status", "severity", "throttle_minutes",
+		"id", "name", "description", "query", "resolve_query", "status", "severity", "throttle_minutes",
 		"entity_id_columns", "created_at", "updated_at", "last_triggered_at",
-		"result_stream", "view_name", "last_error",
+		"result_stream", "view_name", "resolve_view_name", "last_error",
 		"dedicated_alert_acks_stream", "alert_acks_stream_name",
 		"active",
 	}
@@ -415,6 +425,7 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 		rule.Name,
 		rule.Description,
 		rule.Query,
+		rule.ResolveQuery,
 		string(rule.Status),
 		string(rule.Severity),
 		rule.ThrottleMinutes,
@@ -424,6 +435,7 @@ func (s *RuleService) persistRule(ctx context.Context, rule *models.Rule, active
 		lastTriggeredAt, // Pass directly, InsertIntoStream handles formatting
 		rule.ResultStream,
 		rule.ViewName,
+		rule.ResolveViewName,
 		rule.LastError,
 		dedicatedStreamValue, // Pass the explicitly typed boolean value
 		alertAcksStreamName,  // Pass the interface{} value (string or nil)
@@ -467,6 +479,9 @@ func (s *RuleService) UpdateRule(ctx context.Context, id string, req *models.Upd
 	}
 	if req.Query != nil {
 		rule.Query = *req.Query
+	}
+	if req.ResolveQuery != nil {
+		rule.ResolveQuery = *req.ResolveQuery
 	}
 	if req.Severity != nil {
 		rule.Severity = *req.Severity
@@ -528,6 +543,27 @@ func (s *RuleService) DeleteRule(ctx context.Context, id string) error {
 		// Continue with other cleanup operations
 	} else {
 		logrus.Debugf("DELETE_RULE: Successfully deleted alert acks view %s", acksViewName)
+	}
+
+	// Delete the resolve views if they exist
+	if rule.ResolveViewName != "" {
+		resolveViewName := rule.ResolveViewName
+		resolveMVName := fmt.Sprintf("rule_%s_resolve_mv", GetFormattedRuleID(rule.ID))
+
+		// Try to drop the resolve materialized view
+		if err := s.tpClient.DeleteMaterializedView(ctx, resolveMVName); err != nil {
+			logrus.Warnf("Error deleting resolve materialized view %s: %v", resolveMVName, err)
+		} else {
+			logrus.Debugf("Successfully deleted resolve materialized view %s", resolveMVName)
+		}
+
+		// Try to drop the resolve plain view
+		_, err := s.tpClient.ExecuteQuery(ctx, fmt.Sprintf("DROP VIEW IF EXISTS `%s`", resolveViewName))
+		if err != nil {
+			logrus.Warnf("Error dropping resolve view %s: %v", resolveViewName, err)
+		} else {
+			logrus.Debugf("Successfully dropped resolve view %s", resolveViewName)
+		}
 	}
 
 	// Delete dedicated alert acks stream if it exists
@@ -614,6 +650,8 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	sanitizedRuleID := GetFormattedRuleID(rule.ID)
 	plainViewName := fmt.Sprintf("rule_%s_view", sanitizedRuleID)
 	materializedViewName := fmt.Sprintf("rule_%s_mv", sanitizedRuleID)
+	resolveViewName := fmt.Sprintf("rule_%s_resolve_view", sanitizedRuleID)
+	resolveMaterializedViewName := fmt.Sprintf("rule_%s_resolve_mv", sanitizedRuleID)
 
 	// Determine target alert stream name based on rule config
 	targetAlertStreamName := timeplus.AlertAcksMutableStream // Default to global
@@ -648,7 +686,7 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 		if err := s.tpClient.EnsureMutableStream(timeoutCtx, targetAlertStreamName, ackSchema, primaryKeys); err != nil {
 			rule.Status = models.RuleStatusFailed
 			rule.LastError = fmt.Sprintf("Failed to ensure dedicated mutable alert acks stream %s: %v", targetAlertStreamName, err)
-			s.persistRule(ctx, rule, true)
+			s.persistRule(timeoutCtx, rule, true)
 			return fmt.Errorf("failed to ensure dedicated mutable alert acks stream %s: %w", targetAlertStreamName, err)
 		}
 		logrus.Infof("Ensured dedicated mutable alert acks stream exists: %s", targetAlertStreamName)
@@ -656,6 +694,11 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 
 	// Step 1: Force drop existing views with retries to ensure we're starting clean
 	dropViews := []string{plainViewName, materializedViewName}
+	// Add resolve views to drop list if a resolveQuery exists
+	if rule.ResolveQuery != "" {
+		dropViews = append(dropViews, resolveViewName, resolveMaterializedViewName)
+	}
+
 	for _, viewName := range dropViews {
 		// Try up to 3 times to drop each view
 		for i := 0; i < 3; i++ {
@@ -725,6 +768,44 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 		return fmt.Errorf("failed to create plain view: %w", plainViewErr)
 	}
 
+	// If resolveQuery is specified, create a temporary view for it to validate that it has the entity_id column
+	if rule.ResolveQuery != "" {
+		// Create the plain resolve view
+		resolveViewQuery := fmt.Sprintf("CREATE VIEW %s AS %s", resolveViewName, rule.ResolveQuery)
+		logrus.Infof("Creating resolve plain view with query: %s", resolveViewQuery)
+
+		var resolveViewErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			resolveViewErr = s.tpClient.ExecuteDDL(timeoutCtx, resolveViewQuery)
+			if resolveViewErr == nil {
+				break
+			}
+
+			if strings.Contains(resolveViewErr.Error(), "already exists") {
+				logrus.Warnf("Resolve view already exists, trying to forcefully drop it again")
+				dropQuery := fmt.Sprintf("DROP VIEW IF EXISTS %s", resolveViewName)
+				s.tpClient.ExecuteDDL(timeoutCtx, dropQuery)
+				time.Sleep(2 * time.Second)
+			} else {
+				logrus.Warnf("Attempt %d to create resolve plain view failed: %v", attempt, resolveViewErr)
+			}
+
+			if attempt < 3 {
+				time.Sleep(3 * time.Second)
+			}
+		}
+
+		if resolveViewErr != nil {
+			logrus.Errorf("Failed to create resolve plain view: %v", resolveViewErr)
+			rule.Status = models.RuleStatusFailed
+			rule.LastError = fmt.Sprintf("Failed to create resolve plain view: %v", resolveViewErr)
+			s.persistRule(timeoutCtx, rule, true)
+			// Clean up the rule view before returning
+			s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
+			return fmt.Errorf("failed to create resolve plain view: %w", resolveViewErr)
+		}
+	}
+
 	// Step 3: Determine which column to use as the entity_id from the plain view
 	// First, we need to inspect the columns available in the view
 	columnsQuery := fmt.Sprintf("DESCRIBE %s", plainViewName)
@@ -734,12 +815,19 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 		rule.Status = models.RuleStatusFailed
 		rule.LastError = fmt.Sprintf("Failed to get view columns: %v", err)
 		s.persistRule(timeoutCtx, rule, true)
+		// Clean up both views if resolveQuery exists
+		s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
+		if rule.ResolveQuery != "" {
+			s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", resolveViewName))
+		}
 		return fmt.Errorf("failed to get view columns: %w", err)
 	}
 
 	// Find a suitable ID column (prioritize common ID field names)
 	idColumnName := ""
 	var foundColumns []string
+	needsCustomEntityId := false
+	entityIdExpression := ""
 
 	// Check if the rule has EntityIDColumns defined
 	if rule.EntityIDColumns != "" {
@@ -773,15 +861,8 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 				idColumnName = foundColumns[0]
 			} else {
 				// If multiple columns, we need to create a modified view with concatenation
+				needsCustomEntityId = true
 
-				// Drop the original view first
-				// Use ExecuteDDL
-				err = s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
-				if err != nil {
-					logrus.Warnf("Error dropping plain view for concatenation: %v", err)
-				}
-
-				// Create a concatenation expression
 				// Build the concatenation expression with separators
 				var concatParts []string
 				for i, col := range foundColumns {
@@ -790,11 +871,18 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 					}
 					concatParts = append(concatParts, col)
 				}
-				concatenationExpr := fmt.Sprintf("concat(%s)", strings.Join(concatParts, ", "))
+				entityIdExpression = fmt.Sprintf("concat(%s)", strings.Join(concatParts, ", "))
+
+				// Drop the original view first
+				// Use ExecuteDDL
+				err = s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
+				if err != nil {
+					logrus.Warnf("Error dropping plain view for concatenation: %v", err)
+				}
 
 				// Recreate the view with the concatenated entity_id
 				modifiedQuery := fmt.Sprintf("CREATE VIEW %s AS SELECT *, %s AS entity_id FROM (%s)",
-					plainViewName, concatenationExpr, rule.Query)
+					plainViewName, entityIdExpression, rule.Query)
 				// Use ExecuteDDL
 				err = s.tpClient.ExecuteDDL(timeoutCtx, modifiedQuery)
 				if err != nil {
@@ -802,6 +890,10 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 					rule.Status = models.RuleStatusFailed
 					rule.LastError = fmt.Sprintf("Failed to create modified plain view with concatenation: %v", err)
 					s.persistRule(timeoutCtx, rule, true)
+					// Clean up both views if resolveQuery exists
+					if rule.ResolveQuery != "" {
+						s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", resolveViewName))
+					}
 					return fmt.Errorf("failed to create modified plain view with concatenation: %w", err)
 				}
 
@@ -860,7 +952,9 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 
 	// If still no suitable column found, create a hash of _tp_time as the entity_id
 	if idColumnName == "" {
-		// Add a hashed _tp_time column to the view
+		needsCustomEntityId = true
+		entityIdExpression = "lower(hex(md5(toString(_tp_time))))"
+
 		// Drop the original view first
 		// Use ExecuteDDL
 		err = s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
@@ -869,8 +963,8 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 		}
 
 		// Recreate with a hashed _tp_time field
-		modifiedQuery := fmt.Sprintf("CREATE VIEW %s AS SELECT *, lower(hex(md5(toString(_tp_time)))) AS entity_id FROM (%s)",
-			plainViewName, rule.Query)
+		modifiedQuery := fmt.Sprintf("CREATE VIEW %s AS SELECT *, %s AS entity_id FROM (%s)",
+			plainViewName, entityIdExpression, rule.Query)
 		// Use ExecuteDDL
 		err = s.tpClient.ExecuteDDL(timeoutCtx, modifiedQuery)
 		if err != nil {
@@ -878,6 +972,10 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 			rule.Status = models.RuleStatusFailed
 			rule.LastError = fmt.Sprintf("Failed to create modified plain view: %v", err)
 			s.persistRule(timeoutCtx, rule, true)
+			// Clean up both views if resolveQuery exists
+			if rule.ResolveQuery != "" {
+				s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", resolveViewName))
+			}
 			return fmt.Errorf("failed to create modified plain view: %w", err)
 		}
 
@@ -885,6 +983,76 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	}
 
 	logrus.Infof("Using column '%s' as the entity_id for rule %s", idColumnName, rule.ID)
+
+	// Now, if resolveQuery is specified, ensure it has the same entity_id handling
+	if rule.ResolveQuery != "" {
+		// If we had to create a custom entity_id for the main query, do the same for the resolve query
+		if needsCustomEntityId {
+			// Drop the original resolve view
+			err = s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", resolveViewName))
+			if err != nil {
+				logrus.Warnf("Error dropping resolve view for modification: %v", err)
+			}
+
+			// Recreate with the same entity_id expression
+			modifiedResolveQuery := fmt.Sprintf("CREATE VIEW %s AS SELECT *, %s AS entity_id FROM (%s)",
+				resolveViewName, entityIdExpression, rule.ResolveQuery)
+			err = s.tpClient.ExecuteDDL(timeoutCtx, modifiedResolveQuery)
+			if err != nil {
+				logrus.Errorf("Failed to create modified resolve view: %v", err)
+				rule.Status = models.RuleStatusFailed
+				rule.LastError = fmt.Sprintf("Failed to create modified resolve view: %v", err)
+				s.persistRule(timeoutCtx, rule, true)
+				// Clean up both views
+				s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
+				return fmt.Errorf("failed to create modified resolve view: %w", err)
+			}
+
+			logrus.Infof("Created entity_id field in resolve view using expression: %s", entityIdExpression)
+		}
+
+		// Validate that the entity_id column exists in the resolve view
+		resolveColumnsQuery := fmt.Sprintf("DESCRIBE %s", resolveViewName)
+		resolveColumnResults, err := s.tpClient.ExecuteQuery(timeoutCtx, resolveColumnsQuery)
+		if err != nil {
+			logrus.Errorf("Failed to get resolve view columns: %v", err)
+			rule.Status = models.RuleStatusFailed
+			rule.LastError = fmt.Sprintf("Failed to get resolve view columns: %v", err)
+			s.persistRule(timeoutCtx, rule, true)
+			// Clean up both views
+			s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
+			s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", resolveViewName))
+			return fmt.Errorf("failed to get resolve view columns: %w", err)
+		}
+
+		// Check if the entity_id column exists in the resolve view
+		entityIdExists := false
+		for _, column := range resolveColumnResults {
+			colName := ""
+			if name, ok := column["name"].(string); ok {
+				colName = name
+			}
+
+			if colName == idColumnName {
+				entityIdExists = true
+				break
+			}
+		}
+
+		if !entityIdExists {
+			errorMsg := fmt.Sprintf("Entity ID column '%s' not found in resolveQuery results. The resolveQuery must return the same entity_id column as the main query.", idColumnName)
+			logrus.Errorf(errorMsg)
+			rule.Status = models.RuleStatusFailed
+			rule.LastError = errorMsg
+			s.persistRule(timeoutCtx, rule, true)
+			// Clean up both views
+			s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", plainViewName))
+			s.tpClient.ExecuteDDL(timeoutCtx, fmt.Sprintf("DROP VIEW IF EXISTS %s", resolveViewName))
+			return fmt.Errorf(errorMsg)
+		}
+
+		logrus.Infof("Validated that entity_id column '%s' exists in both the rule query and resolveQuery", idColumnName)
+	}
 
 	// Construct the expression to capture triggering data for the comment field as JSON
 	var dataCaptureParts []string
@@ -982,6 +1150,69 @@ func (s *RuleService) StartRule(ctx context.Context, ruleID string) error {
 	}
 
 	logrus.Infof("START_RULE: Successfully started rule %s with dedicated stream flag: %v", rule.ID, dedicatedFlagValue)
+
+	// Step 6: Create the resolve query view and materialized view if provided
+	if rule.ResolveQuery != "" {
+		logrus.Infof("Creating resolve query view for rule %s", rule.ID)
+
+		// Create the plain view with the resolve query
+		resolveViewQuery := fmt.Sprintf("CREATE VIEW %s AS %s", resolveViewName, rule.ResolveQuery)
+
+		logrus.Infof("Creating resolve plain view with query: %s", resolveViewQuery)
+
+		var resolveViewErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			resolveViewErr = s.tpClient.ExecuteDDL(timeoutCtx, resolveViewQuery)
+			if resolveViewErr == nil {
+				break
+			}
+			logrus.Warnf("Attempt %d to create resolve plain view failed: %v", attempt, resolveViewErr)
+			if attempt < maxAttempts {
+				time.Sleep(2 * time.Second)
+			}
+		}
+
+		if resolveViewErr != nil {
+			logrus.Errorf("Failed to create resolve plain view: %v", resolveViewErr)
+			rule.Status = models.RuleStatusFailed
+			rule.LastError = fmt.Sprintf("Failed to create resolve plain view: %v", resolveViewErr)
+			s.persistRule(timeoutCtx, rule, true)
+			return fmt.Errorf("failed to create resolve plain view: %w", resolveViewErr)
+		}
+
+		// Create the materialized view that will auto-acknowledge alerts
+		resolveMVQuery := timeplus.GetRuleResolveViewQuery(
+			rule.ID,
+			idColumnName,
+			targetAlertStreamName,
+		)
+
+		logrus.Infof("Creating resolve materialized view with query: %s", resolveMVQuery)
+
+		var resolveMVErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			resolveMVErr = s.tpClient.ExecuteDDL(timeoutCtx, resolveMVQuery)
+			if resolveMVErr == nil {
+				break
+			}
+			logrus.Warnf("Attempt %d to create resolve materialized view failed: %v", attempt, resolveMVErr)
+			if attempt < maxAttempts {
+				time.Sleep(2 * time.Second)
+			}
+		}
+
+		if resolveMVErr != nil {
+			logrus.Errorf("Failed to create resolve materialized view: %v", resolveMVErr)
+			rule.Status = models.RuleStatusFailed
+			rule.LastError = fmt.Sprintf("Failed to create resolve materialized view: %v", resolveMVErr)
+			s.persistRule(timeoutCtx, rule, true)
+			return fmt.Errorf("failed to create resolve materialized view: %w", resolveMVErr)
+		}
+
+		// Store the resolve view name in the rule
+		rule.ResolveViewName = resolveViewName
+	}
+
 	return nil
 }
 
@@ -1345,6 +1576,27 @@ func (s *RuleService) StopRule(ctx context.Context, ruleID string) error {
 	acksViewName := fmt.Sprintf("rule_%s_acks_view", rule.ID)
 	if err := s.tpClient.DeleteMaterializedView(ctx, acksViewName); err != nil {
 		logrus.Warnf("Error deleting alert acks view %s: %v", acksViewName, err)
+	}
+
+	// Delete the resolve views if they exist
+	if rule.ResolveViewName != "" {
+		resolveViewName := rule.ResolveViewName
+		resolveMVName := fmt.Sprintf("rule_%s_resolve_mv", GetFormattedRuleID(rule.ID))
+
+		// Try to drop the resolve materialized view
+		if err := s.tpClient.DeleteMaterializedView(ctx, resolveMVName); err != nil {
+			logrus.Warnf("Error deleting resolve materialized view %s: %v", resolveMVName, err)
+		} else {
+			logrus.Debugf("Successfully deleted resolve materialized view %s", resolveMVName)
+		}
+
+		// Try to drop the resolve plain view
+		_, err := s.tpClient.ExecuteQuery(ctx, fmt.Sprintf("DROP VIEW IF EXISTS `%s`", resolveViewName))
+		if err != nil {
+			logrus.Warnf("Error dropping resolve view %s: %v", resolveViewName, err)
+		} else {
+			logrus.Debugf("Successfully dropped resolve view %s", resolveViewName)
+		}
 	}
 
 	// Update rule status

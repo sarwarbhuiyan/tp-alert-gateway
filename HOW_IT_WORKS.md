@@ -14,6 +14,7 @@ Rules are defined using a JSON structure that includes:
 - **severity**: The severity level (info, warning, critical)
 - **throttleMinutes**: Time period to throttle repeated alerts
 - **entityIdColumns**: Column(s) used as entity identifiers (comma-separated for multiple columns)
+- **resolveQuery**: Optional query that defines conditions for automatically resolving alerts
 
 Example rule definition:
 ```json
@@ -23,7 +24,8 @@ Example rule definition:
   "query": "SELECT device_id, temperature FROM device_temperatures WHERE temperature > 30",
   "severity": "warning",
   "throttleMinutes": 5,
-  "entityIdColumns": "device_id"
+  "entityIdColumns": "device_id",
+  "resolveQuery": "SELECT device_id, temperature FROM device_temperatures WHERE temperature <= 30"
 }
 ```
 
@@ -102,6 +104,51 @@ This materialized view:
 - Generates a JSON comment with relevant event data
 - Includes state tracking for alert lifecycle
 
+### 4. Resolver View Creation (Optional)
+
+If a `resolveQuery` is provided, a separate resolver view is created to automatically acknowledge alerts when conditions are no longer met:
+
+```sql
+CREATE MATERIALIZED VIEW default.rule_{sanitized_rule_id}_resolver_mv INTO default.tp_alert_acks_mutable
+(
+  `rule_id` string,
+  `entity_id` string,
+  `state` string,
+  `created_at` datetime64(3),
+  `updated_at` datetime,
+  `updated_by` string,
+  `comment` string,
+  `_tp_time` datetime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
+  `_tp_sn` int64
+) AS
+WITH resolver_events AS
+  (
+    SELECT
+      view.*, ack.state AS ack_state, ack.created_at AS ack_created_at
+    FROM
+      default.rule_{sanitized_rule_id}_resolver_view AS view
+    INNER JOIN default.tp_alert_acks_mutable AS ack ON view.{entity_id_column} = ack.entity_id
+    WHERE
+      ack.rule_id = '{rule_id}' AND ack.state = 'active'
+  )
+SELECT
+  '{rule_id}' AS rule_id, 
+  re.{entity_id_column} AS entity_id, 
+  'resolved' AS state, 
+  re.ack_created_at AS created_at, 
+  now() AS updated_at, 
+  'system' AS updated_by, 
+  concat('{', array_string_concat([{json_fields}], ', '), '}') AS comment
+FROM
+  resolver_events AS re
+```
+
+This resolver materialized view:
+- Identifies entities where alert conditions are no longer true but active alerts exist
+- Automatically updates these alerts to 'resolved' state
+- Uses 'system' as the user who acknowledged the alert
+- Includes the latest data in the comment field
+
 ## Stream Architecture
 
 The system uses several Timeplus streams:
@@ -132,23 +179,7 @@ The system uses several Timeplus streams:
    ) PRIMARY KEY (id)
    ```
 
-2. **tp_alerts**: Stream that stores triggered alerts
-   ```sql
-   CREATE STREAM tp_alerts (
-     id string,
-     rule_id string,
-     rule_name string,
-     severity string,
-     triggered_at datetime64,
-     data string,
-     acknowledged bool,
-     acknowledged_at datetime64 NULL,
-     acknowledged_by string NULL,
-     _tp_time datetime64
-   )
-   ```
-
-3. **tp_alert_acks_mutable**: Global mutable stream for alert acknowledgments
+2. **tp_alert_acks_mutable**: Global mutable stream for alert acknowledgments
    ```sql
    CREATE MUTABLE STREAM tp_alert_acks_mutable (
      rule_id string,
@@ -163,6 +194,8 @@ The system uses several Timeplus streams:
    ) PRIMARY KEY (rule_id, entity_id)
    ```
 
+   > **Important Note**: When constructing SQL statements for creating streams with nullable columns, ensure to properly handle the column definitions. For nullable columns, use the syntax `` `column_name` nullable(type) `` and for non-nullable columns, use `` `column_name` type ``. Mixing these formats can lead to syntax errors.
+
 ### Per-Rule Streams
 
 For each rule, the system can create:
@@ -176,6 +209,7 @@ For each rule, the system can create:
 2. The system checks if alerts should be throttled based on the throttleMinutes setting
 3. Existing acknowledgments are checked to prevent duplicate alerts
 4. If conditions are met, a new alert record is inserted into the `tp_alert_acks_mutable` stream with state="active"
+5. If a resolver query is configured, alerts are automatically acknowledged with state="resolved" when conditions no longer match
 
 ## Acknowledgment System
 
@@ -184,10 +218,11 @@ The system supports acknowledgments to suppress alerts for specific entities:
 1. Global acknowledgments stored in `tp_alert_acks_mutable`
 2. Per-rule acknowledgments in dedicated streams (if enabled)
 3. Acknowledgments include:
-   - State (active, acknowledged)
+   - State (active, acknowledged, resolved)
    - Who acknowledged
    - When acknowledged
    - Optional comment with event data
+4. Automatic acknowledgments via resolver queries, marked with 'system' as the acknowledger
 
 ## API Endpoints
 
@@ -205,17 +240,3 @@ The alert gateway provides the following APIs:
 - **POST /alerts/{id}/acknowledge**: Acknowledge an alert
 - **POST /rules/{id}/acks**: Acknowledge all alerts for an entity ID
 
-## Timeplus Integration
-
-The system uses the Timeplus Proton client to interact with Timeplus:
-
-```go
-conn, err := proton.Open(&proton.Options{
-    Address:  fmt.Sprintf("%s:%d", host, port),
-    Username: username,
-    Password: password,
-    Database: database,
-})
-```
-
-The client then uses direct methods like `conn.Exec()` and `conn.Query()` for all Timeplus operations, following best practices for working with materialized views and streaming data.

@@ -85,6 +85,7 @@ curl -X POST http://localhost:8080/api/rules \
 | `severity` | Alert severity ("info", "warning", or "critical") |
 | `throttleMinutes` | Time in minutes before a new alert can be triggered for the same entity |
 | `entityIdColumns` | Column(s) used to identify unique entities (comma-separated) |
+| `resolveQuery` | Optional query that defines when alerts should be automatically resolved |
 | `dedicatedAlertAcksStream` | (Optional) Whether to use a dedicated stream for storing alert acknowledgments |
 
 ### SQL Query Guidelines
@@ -102,6 +103,8 @@ When writing queries for alert rules, follow these best practices:
 
 4. For stream-to-table joins, make sure the stream is on the left side of the join (stream to table). Table-to-stream joins are not supported.
 
+5. When using resolver queries, ensure they select the same entity ID columns as the main query.
+
 ### Example Alert Rules
 
 #### Network Error Monitoring
@@ -117,13 +120,14 @@ When writing queries for alert rules, follow these best practices:
 }
 ```
 
-#### Temperature Monitoring
+#### Temperature Monitoring with Auto-Resolution
 
 ```json
 {
   "name": "High Temperature Alert",
   "description": "Alert when any device temperature exceeds 30°C",
   "query": "SELECT * FROM device_temperatures WHERE temperature > 30",
+  "resolveQuery": "SELECT * FROM device_temperatures WHERE temperature <= 30",
   "severity": "warning",
   "throttleMinutes": 10,
   "entityIdColumns": "device_id"
@@ -152,11 +156,22 @@ After creating a rule, it's automatically started. You can also:
 - Get alerts: `GET /api/rules/{ruleId}/alerts`
 - Acknowledge an alert: `POST /api/alerts/{id}/acknowledge`
 
+### Automatic Alert Resolution
+
+When a rule includes a `resolveQuery`, alerts will be automatically acknowledged and marked as "resolved" when:
+
+1. The entity no longer matches the alert conditions (original query)
+2. The entity matches the conditions specified in the resolver query
+3. There is an active alert for that entity and rule
+
+This automatic resolution happens in real-time as data is processed, without requiring manual intervention.
+
 ## Common Limitations and Troubleshooting
 
 - **Stream to Table Joins**: Table to stream joins are not currently supported. Use stream to table joins instead.
 - **View Names**: If you encounter errors about view creation, check for name conflicts.
 - **Alert Throttling**: If alerts are not triggering as expected, verify the `throttleMinutes` setting.
+- **Nullable Columns**: When working with SQL that creates streams or tables with nullable columns, use the correct syntax: `` `column_name` nullable(type) `` for nullable columns and `` `column_name` type `` for non-nullable columns. Incorrect syntax can lead to stream creation failures.
 
 ## API Reference
 
@@ -222,6 +237,13 @@ For more information about the tests, see the [E2E Test README](./pkg/e2e/README
 
 The `sourceStream` field has been removed from rule definitions as it was redundant with the SQL query which already specifies the stream(s) being monitored. This simplifies the API and provides better support for complex queries that may reference multiple streams or use joins.
 
-## License
+### Fixed Stream Creation for Nullable Columns
 
-MIT 
+Fixed a critical bug in the `SetupMutableAlertAcksStream` function that incorrectly constructed the SQL for creating streams with nullable columns. The fix ensures that column definitions are properly constructed, with nullable columns using the `nullable(type)` syntax and non-nullable columns using the standard syntax. This resolves issues with stream creation failures due to SQL syntax errors.
+
+### Automatic Alert Resolution
+
+Added support for automatic alert resolution via resolver queries. Rules can now specify a `resolveQuery` that defines conditions under which active alerts should be automatically marked as resolved. This eliminates the need for manual acknowledgment when alert conditions are no longer present.
+
+## License
+MIT
